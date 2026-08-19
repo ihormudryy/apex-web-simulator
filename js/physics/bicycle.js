@@ -21,12 +21,17 @@ export const BRAKE_DEMAND = 30000;
 // Under 5 g the front axle carries ~14.5 kN against the rear's ~11.4 kN, so the
 // bias has to sit forward of centre or the rear locks first.
 export const BRAKE_BIAS_FRONT = 0.58;
-// Off-throttle driveline drag. The engine is on the rear axle, so this is a rear
-// tyre force and shares the rear friction budget.
+// Off-throttle driveline drag, at and above `ENGINE_BRAKE_SPEED`. The engine is
+// on the rear axle, so this is a rear tyre force and shares the rear friction
+// budget. It scales with speed the way real engine braking scales with rpm —
+// applying the full figure at walking pace makes the car feel anchored.
 export const ENGINE_BRAKE = 2500;
+export const ENGINE_BRAKE_SPEED = 20;
 export const ROLLING_RESISTANCE = 0.015;
 export const ENGINE_FX_MAX = 14000;
 export const REVERSE_FX = 4000;
+/** Reverse is a recovery crawl, so drive cuts out once it is rolling this fast. */
+export const REVERSE_SPEED_LIMIT = 8;
 export const PACEJKA_B = 12;
 export const PACEJKA_C = 1.35;
 
@@ -50,11 +55,31 @@ function pacejkaFy(dLat, alpha) {
   return -dLat * Math.sin(PACEJKA_C * Math.atan(PACEJKA_B * alpha));
 }
 
-function clipFriction(fx, fy, maxF) {
-  const mag = Math.hypot(fx, fy);
-  if (mag <= maxF || mag === 0) return { fx, fy };
-  const s = maxF / mag;
-  return { fx: fx * s, fy: fy * s };
+/**
+ * Split an axle's grip between cornering and drive: cornering first, drive from
+ * whatever is left on the friction ellipse.
+ *
+ * There is no wheel-speed state here, so the longitudinal force is a *demand* —
+ * the engine asks for `POWER/v` capped at `ENGINE_FX_MAX`, which below about
+ * 46 m/s is more than the rear tyres can transmit. Scaling both components down
+ * together, as a plain friction-circle clip does, made a cornering car on the
+ * throttle surrender 35-40% of its rear lateral force to a drive force the
+ * contact patch could never have delivered — the car cornered as if on ice.
+ *
+ * Sizing the drive force to the grip left after cornering is what really happens
+ * once a tyre starts to spin, and it keeps the loss where it belongs: you cannot
+ * accelerate hard mid-corner, but asking for it no longer costs you the corner.
+ *
+ * Straight-line performance is untouched: with no cornering force the whole
+ * circle is available, so a launch is traction-limited exactly as before.
+ */
+function allocateGrip(fxDemand, fy, maxF) {
+  const lateral = Math.min(Math.abs(fy), maxF);
+  const fxMax = Math.sqrt(Math.max(0, maxF * maxF - lateral * lateral));
+  return {
+    fx: clamp(fxDemand, -fxMax, fxMax),
+    fy: Math.sign(fy) * lateral,
+  };
 }
 
 /**
@@ -101,9 +126,10 @@ export function step(state, input, sample, dt) {
   if (throttle > 0) {
     FxEng = Math.min(POWER / Math.max(Math.abs(vx), 3), ENGINE_FX_MAX) * throttle;
   } else if (throttle < 0) {
-    FxEng = throttle * REVERSE_FX;
+    FxEng = vx > -REVERSE_SPEED_LIMIT ? throttle * REVERSE_FX : 0;
   } else if (moving) {
-    FxEng = -Math.sign(vx) * ENGINE_BRAKE;
+    const fade = Math.min(1, Math.abs(vx) / ENGINE_BRAKE_SPEED);
+    FxEng = -Math.sign(vx) * ENGINE_BRAKE * fade;
   }
 
   const FxBrk = brake && moving ? -Math.sign(vx) * BRAKE_DEMAND : 0;
@@ -118,13 +144,13 @@ export function step(state, input, sample, dt) {
   let FxRF = FxBrk * BRAKE_BIAS_FRONT + rrSign * rrF;
   let FxRR = FxEng + FxBrk * (1 - BRAKE_BIAS_FRONT) + rrSign * rrR;
 
-  const clippedF = clipFriction(FxRF, FyF, dLatF);
-  FxRF = clippedF.fx;
-  const FyFClipped = clippedF.fy;
+  const gripF = allocateGrip(FxRF, FyF, dLatF);
+  FxRF = gripF.fx;
+  const FyFClipped = gripF.fy;
 
-  const clippedR = clipFriction(FxRR, FyR, dLatR);
-  FxRR = clippedR.fx;
-  const FyRClipped = clippedR.fy;
+  const gripR = allocateGrip(FxRR, FyR, dLatR);
+  FxRR = gripR.fx;
+  const FyRClipped = gripR.fy;
 
   // Aero acts on the body, not through the contact patches, so it is added after
   // the friction circle rather than clipped by it.

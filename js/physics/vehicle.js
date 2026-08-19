@@ -12,7 +12,8 @@ import { step } from './bicycle.js';
 /** Below this forward speed, "reverse" means reverse rather than brake. */
 export const REVERSE_THRESHOLD = 0.5;
 export const REVERSE_THROTTLE = -0.25;
-const WHEEL_RADIUS = 0.334;
+/** Tyre rolling radius, metres. Shared with the tacho. */
+export const WHEEL_RADIUS = 0.334;
 const MAX_STEER_DEG = 18;
 const STEER_RATE = 2.5;
 /** Substep target rate. The tyre model needs a short step to stay convergent, so
@@ -96,7 +97,9 @@ export function advance(v, input, track, dt) {
   const n = clamp(Math.ceil(frame * SUBSTEP_HZ), 4, MAX_SUBSTEPS);
   const h = frame / n;
   const { brake, throttle } = resolvePedals(v, input);
-  v.braking = brake;
+  // Brake lights follow brake or reverse, so they stay lit through the handover
+  // from "reverse key is braking" to "reverse key is reversing".
+  v.braking = brake || throttle < 0;
   v.wheelSpin = 0;
 
   let sample = track.query(v.x, v.z);
