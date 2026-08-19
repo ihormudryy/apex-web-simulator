@@ -50,7 +50,8 @@ export function step(state, input, sample, dt) {
   const dLatR = mu * FzR;
 
   const vxMag = Math.max(Math.abs(vx), 0.1);
-  const alphaF = Math.atan2(vy + av * LF, vxMag) - steer;
+  const vxSign = Math.abs(vx) < 0.05 ? 0 : Math.sign(vx);
+  const alphaF = Math.atan2(vy + av * LF, vxMag) - vxSign * steer;
   const alphaR = Math.atan2(vy - av * LR, vxMag);
 
   const FyF = pacejkaFy(dLatF, alphaF);

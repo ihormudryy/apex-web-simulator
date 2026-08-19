@@ -47,3 +47,13 @@ test('drive force uses rear longitudinal budget', () => {
   const frontOnly = 1.6 * MASS * 9.81 * 0.46;
   assert.ok(fx > frontOnly * 1.02, `fx=${fx} capped at front grip ${frontOnly}`);
 });
+
+test('reverse steering reverses lateral and yaw response', () => {
+  const dt = 0.01;
+  const input = { throttle: 0, brake: false, steer: 0.1 };
+  const base = { vy: 0, av: 0, axPrev: 0 };
+  const f = step({ ...base, vx: 1 }, input, tarmac, dt);
+  const r = step({ ...base, vx: -1 }, input, tarmac, dt);
+  assert.ok(f.fy * r.fy < 0, `fy same sign: forward=${f.fy} reverse=${r.fy}`);
+  assert.ok(f.av * r.av < 0, `yaw same sign: forward=${f.av} reverse=${r.av}`);
+});
