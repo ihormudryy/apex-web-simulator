@@ -1,5 +1,10 @@
-// Planar F1 bicycle model: two axles, a simplified Pacejka tyre, aero load and
-// longitudinal load transfer. Car-local frame — `vx` forward, `vy` to the right.
+// Planar F1 model with four-corner load transfer and load-sensitive peak grip.
+
+import { wheelNormalLoads } from './loadTransfer.js';
+import { peakGrip, WHEEL_RADIUS } from './wheel.js';
+
+export { TRACK_HALF } from './loadTransfer.js';
+export { WHEEL_RADIUS } from './wheel.js';
 
 export const MU = { tarmac: 1.6, kerb: 1.2, grass: 0.35 };
 
@@ -93,7 +98,7 @@ function allocateGrip(fxDemand, fy, maxF) {
  * @param {number} dt seconds.
  */
 export function step(state, input, sample, dt) {
-  const { vx, vy, av, axPrev } = state;
+  const { vx, vy, av, axPrev, ayPrev = 0 } = state;
   const { throttle, brake, steer } = input;
 
   // Aero follows the whole velocity vector, not just the forward component, so a
@@ -105,11 +110,15 @@ export function step(state, input, sample, dt) {
   const Fd = q * CDA;
   const FL = q * CLA;
 
-  const FzF = Math.max(200, MASS * G * LR / WB + 0.4 * FL - MASS * axPrev * H_CG / WB);
-  const FzR = Math.max(200, MASS * G * LF / WB + 0.6 * FL + MASS * axPrev * H_CG / WB);
+  // Lateral load transfer only once the car is moving — at rest ayPrev would
+  // redistribute grip across the track and let a steered wheel yaw the body.
+  const ayEff = Math.abs(vx) > V_RELAX ? ayPrev : 0;
+  const fzW = wheelNormalLoads(axPrev, ayEff, FL);
+  const FzF = fzW[0] + fzW[1];
+  const FzR = fzW[2] + fzW[3];
 
-  const dLatF = mu * FzF;
-  const dLatR = mu * FzR;
+  const dLatF = peakGrip(mu, fzW[0]) + peakGrip(mu, fzW[1]);
+  const dLatR = peakGrip(mu, fzW[2]) + peakGrip(mu, fzW[3]);
 
   const vxMag = Math.max(Math.abs(vx), V_RELAX);
   // +av is Three.js yaw-left (rotation.y). Front then moves toward -y, rear toward +y.
@@ -179,12 +188,14 @@ export function step(state, input, sample, dt) {
   newAv *= 1 - Math.min(1, dt * 1.2);
 
   const newAxPrev = dt > 0 ? (newVx - vx) / dt : axPrev;
+  const newAyPrev = dt > 0 ? (newVy - vy) / dt : ayPrev;
 
   return {
     vx: newVx,
     vy: newVy,
     av: newAv,
     axPrev: newAxPrev,
+    ayPrev: newAyPrev,
     fx: Fx,
     fy: Fy,
   };

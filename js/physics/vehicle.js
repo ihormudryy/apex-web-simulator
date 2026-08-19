@@ -29,13 +29,15 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 export function createVehicle({ x = 0, z = 0, yaw = 0 } = {}) {
   return {
     x, z, yaw,
-    vx: 0, vz: 0,          // world velocity
-    av: 0,                 // yaw rate, +ve = left
+    vx: 0, vz: 0,
+    av: 0,
     axPrev: 0,
+    ayPrev: 0,
+    omega: [0, 0, 0, 0],
     steerAngle: 0,
     steerSmooth: 0,
     braking: false,
-    wheelSpin: 0,          // radians of wheel rotation this frame
+    wheelSpin: 0,
     spawn: { x, z, yaw },
     resets: 0,
   };
@@ -110,16 +112,24 @@ export function advance(v, input, track, dt) {
     const lat = v.vx * cosY + v.vz * -sinY;
 
     const result = step(
-      { vx: fwd, vy: lat, av: v.av, axPrev: v.axPrev },
+      {
+        vx: fwd, vy: lat, av: v.av,
+        axPrev: v.axPrev, ayPrev: v.ayPrev,
+      },
       { throttle, brake, steer: v.steerAngle },
       sample,
-      h
+      h,
     );
 
     const accFwd = (result.vx - fwd) / h;
     const accLat = (result.vy - lat) / h;
     v.av = result.av;
     v.axPrev = result.axPrev;
+    v.ayPrev = result.ayPrev;
+
+    const rearSpin = result.vx / WHEEL_RADIUS;
+    v.omega[2] = rearSpin;
+    v.omega[3] = rearSpin;
 
     // Back to world along the same two basis vectors.
     v.vx += h * (-sinY * accFwd + cosY * accLat);
@@ -144,7 +154,7 @@ export function advance(v, input, track, dt) {
       sample = track.query(v.x, v.z);
     }
 
-    v.wheelSpin += h * result.vx / WHEEL_RADIUS;
+    v.wheelSpin += h * (v.omega[2] + v.omega[3]) * 0.5;
   }
 }
 
@@ -160,7 +170,8 @@ export function applyWallImpulse(v, nx, nz, sign, penetration) {
 }
 
 function resetToSpawn(v) {
-  v.vx = 0; v.vz = 0; v.av = 0; v.axPrev = 0;
+  v.vx = 0; v.vz = 0; v.av = 0; v.axPrev = 0; v.ayPrev = 0;
+  v.omega = [0, 0, 0, 0];
   v.x = v.spawn.x; v.z = v.spawn.z; v.yaw = v.spawn.yaw;
   v.resets++;
 }
