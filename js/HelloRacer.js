@@ -3,6 +3,7 @@ import Stats from 'three/addons/libs/stats.module.js';
 import { Car } from './Car.js';
 import { MaterialPanel } from './MaterialPanel.js';
 import { createSilverstone } from './track/Silverstone.js';
+import { nextCameraMode } from './cameraModes.js';
 
 class HelloRacer {
   constructor() {
@@ -28,9 +29,7 @@ class HelloRacer {
     this._lastMouse = { x: 0, y: 0 };
 
     this._viewMode = 'chase';
-    this._flyTime = 0;
 
-    this._up = new THREE.Vector3(0, 1, 0);
     this._forward = new THREE.Vector3();
     this._right = new THREE.Vector3();
 
@@ -113,7 +112,7 @@ class HelloRacer {
     el.addEventListener('mouseleave', () => { this._dragButton = -1; });
 
     el.addEventListener('mousemove', e => {
-      if (this._dragButton === -1) return;
+      if (this._viewMode !== 'chase' || this._dragButton === -1) return;
 
       const dx = e.clientX - this._lastMouse.x;
       const dy = e.clientY - this._lastMouse.y;
@@ -134,6 +133,7 @@ class HelloRacer {
     });
 
     el.addEventListener('wheel', e => {
+      if (this._viewMode !== 'chase') return;
       this._camRadius = THREE.MathUtils.clamp(this._camRadius + e.deltaY * 0.01, 2, 30);
     }, { passive: true });
   }
@@ -171,9 +171,40 @@ class HelloRacer {
     return from + (to - from) * (1 - Math.pow(stiffness, dt));
   }
 
+  _setCameraFov(fov) {
+    if (Math.abs(this.camera.fov - fov) > 0.02) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
+  _updateOnboardCamera(alongFwd, height, lookAhead, lookY, fov) {
+    const car = this.car;
+    const pos = car.root.position;
+    car.headingForward(this._forward);
+    this.camera.position.set(
+      pos.x + this._forward.x * alongFwd,
+      pos.y + height,
+      pos.z + this._forward.z * alongFwd
+    );
+    this._camTarget.set(
+      pos.x + this._forward.x * lookAhead,
+      pos.y + lookY,
+      pos.z + this._forward.z * lookAhead
+    );
+    this.camera.lookAt(this._camTarget);
+    this._setCameraFov(fov);
+    this._camRoll = 0;
+    this._chaseReady = false;
+  }
+
   _updateCamera(dt) {
-    if (this._viewMode === 'flythrough') {
-      this._updateFlythroughCamera(dt);
+    if (this._viewMode === 'driver') {
+      this._updateOnboardCamera(0.12, 1.06, 16, 0.88, 58);
+      return;
+    }
+    if (this._viewMode === 'front') {
+      this._updateOnboardCamera(2.55, 0.42, 22, 0.32, 52);
       return;
     }
 
@@ -245,58 +276,6 @@ class HelloRacer {
     }
   }
 
-  _updateFlythroughCamera(dt) {
-    if (Math.abs(this.camera.fov - this._baseFov) > 0.05) {
-      this.camera.fov = this._baseFov;
-      this.camera.updateProjectionMatrix();
-    }
-
-    this._flyTime += dt;
-    const shotDuration = 6;
-    const shot = Math.floor(this._flyTime / shotDuration) % 4;
-    const phase = (this._flyTime % shotDuration) / shotDuration;
-
-    const carPos = this.car.root.position;
-    this.car.headingForward(this._forward);
-    this._right.crossVectors(this._forward, this._up).normalize();
-
-    const target = this._camTarget;
-    const desiredPos = this._camPos;
-
-    if (shot === 0) {
-      desiredPos.copy(carPos)
-        .addScaledVector(this._forward, -7.5)
-        .addScaledVector(this._right, Math.sin(this._flyTime * 0.6) * 0.6);
-      desiredPos.y = 2.4;
-      target.copy(carPos).addScaledVector(this._forward, 4.6);
-      target.y = 1.0;
-    } else if (shot === 1) {
-      desiredPos.copy(carPos)
-        .addScaledVector(this._right, 6.2 + Math.sin(this._flyTime * 0.9) * 1.3)
-        .addScaledVector(this._forward, -1.5);
-      desiredPos.y = 1.8 + Math.sin(this._flyTime * 1.5) * 0.2;
-      target.copy(carPos).addScaledVector(this._forward, 3.2);
-      target.y = 0.8;
-    } else if (shot === 2) {
-      const angle = this._flyTime * 0.45;
-      desiredPos.copy(carPos);
-      desiredPos.x += Math.cos(angle) * 8.2;
-      desiredPos.z += Math.sin(angle) * 8.2;
-      desiredPos.y = 7.2 + Math.sin(this._flyTime * 0.6) * 0.5;
-      target.copy(carPos);
-      target.y = 0.4;
-    } else {
-      desiredPos.copy(carPos).addScaledVector(this._forward, 8.6);
-      desiredPos.y = 2.1;
-      target.copy(carPos).addScaledVector(this._forward, 1.2 - phase * 1.4);
-      target.y = 1.0;
-    }
-
-    const lerp = 1 - Math.pow(0.005, dt);
-    this.camera.position.lerp(desiredPos, lerp);
-    this.camera.lookAt(target);
-  }
-
   _onResize() {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
@@ -333,8 +312,10 @@ class HelloRacer {
 
   _onKeyDown(e) {
     if (e.code === 'KeyC') {
-      this._viewMode = this._viewMode === 'flythrough' ? 'chase' : 'flythrough';
-      this._flyTime = 0;
+      if (e.repeat) return;
+      this._viewMode = nextCameraMode(this._viewMode);
+      this._yaw = 0;
+      this._panOffset.set(0, 0, 0);
       this._chaseReady = false;
       return;
     }
