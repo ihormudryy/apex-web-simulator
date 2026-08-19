@@ -51,8 +51,9 @@ export function step(state, input, sample, dt) {
 
   const vxMag = Math.max(Math.abs(vx), 0.1);
   const vxSign = Math.abs(vx) < 0.05 ? 0 : Math.sign(vx);
-  const alphaF = Math.atan2(vy + av * LF, vxMag) + vxSign * steer;
-  const alphaR = Math.atan2(vy - av * LR, vxMag);
+  // +av is Three.js yaw-left (rotation.y). Front then moves toward -y, rear toward +y.
+  const alphaF = Math.atan2(vy - av * LF, vxMag) + vxSign * steer;
+  const alphaR = Math.atan2(vy + av * LR, vxMag);
 
   const FyF = pacejkaFy(dLatF, alphaF);
   const FyR = pacejkaFy(dLatR, alphaR);

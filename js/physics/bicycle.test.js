@@ -103,3 +103,56 @@ test('steady left steer curves left without excessive sideslip', () => {
   assert.ok(Math.abs(sideslip) < 15 * Math.PI / 180,
     `sideslip=${sideslip * 180 / Math.PI}°`);
 });
+
+function worldToLocal(cvelX, cvelY, sinY, cosY) {
+  return {
+    x: cosY * cvelX - sinY * cvelY,
+    y: sinY * cvelX + cosY * cvelY,
+  };
+}
+
+function rotateYaw(localX, localY, sinY, cosY) {
+  return {
+    x: cosY * localX + sinY * localY,
+    y: -sinY * localX + cosY * localY,
+  };
+}
+
+test('full throttle at non-zero heading does not spin', () => {
+  const yaw0 = 159.44 * Math.PI / 180;
+  let yaw = yaw0;
+  let cvelX = 0;
+  let cvelY = 0;
+  let av = 0;
+  let axPrev = 0;
+  const n = 4;
+  const h = (1 / 60) / n;
+
+  for (let f = 0; f < 180; f++) {
+    for (let i = 0; i < n; i++) {
+      const sinY = Math.sin(yaw);
+      const cosY = Math.cos(yaw);
+      const vel = worldToLocal(cvelX, cvelY, sinY, cosY);
+      const result = step(
+        { vx: vel.x, vy: vel.y, av, axPrev },
+        { throttle: 1, brake: false, steer: 0 },
+        tarmac,
+        h
+      );
+      const accX = (result.vx - vel.x) / h;
+      const accY = (result.vy - vel.y) / h;
+      av = result.av;
+      axPrev = result.axPrev;
+      const a2d = rotateYaw(accX, accY, sinY, cosY);
+      cvelX += h * a2d.x;
+      cvelY += h * a2d.y;
+      yaw += h * av;
+    }
+  }
+
+  const dYawDeg = (yaw - yaw0) * 180 / Math.PI;
+  const vel = worldToLocal(cvelX, cvelY, Math.sin(yaw), Math.cos(yaw));
+  assert.ok(Math.abs(dYawDeg) < 5, `spun ${dYawDeg.toFixed(1)}° under throttle`);
+  assert.ok(vel.x > 20, `did not accelerate, vx=${vel.x}`);
+  assert.ok(Math.abs(vel.y) < 1, `sideslip vy=${vel.y}`);
+});
