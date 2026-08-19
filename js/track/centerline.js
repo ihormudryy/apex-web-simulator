@@ -87,17 +87,20 @@ export function buildCenterline(waypoints, sampleCount = 4000) {
  * junction or two is an artefact of the tessellation, not of the road.
  */
 export function minCurvatureRadius(centerline, baseline = 4) {
+  return Math.min(...curvatureRadii(centerline, baseline));
+}
+
+/** Per-station turn radius, in metres. `Infinity` on a straight. */
+export function curvatureRadii(centerline, baseline = 4) {
   const { samples, spacing } = centerline;
   const w = Math.max(1, Math.round(baseline / spacing));
   const span = w * spacing;
-  let tightest = Infinity;
-  for (let i = 0; i < samples.length; i++) {
-    const a = samples[i], b = samples[(i + w) % samples.length];
+  return samples.map((a, i) => {
+    const b = samples[(i + w) % samples.length];
     const dot = Math.max(-1, Math.min(1, a.tx * b.tx + a.tz * b.tz));
     const turn = Math.acos(dot);
-    if (turn > 1e-9) tightest = Math.min(tightest, span / turn);
-  }
-  return tightest;
+    return turn > 1e-9 ? span / turn : Infinity;
+  });
 }
 
 /** Largest heading change between adjacent stations, in radians. */

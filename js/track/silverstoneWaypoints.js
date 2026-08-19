@@ -1,4 +1,4 @@
-import { filletToLength, ringLength } from './fillet.js';
+import { filletToLength } from './fillet.js';
 
 // Approximate GP loop, metres, clockwise from Hamilton Straight toward Abbey.
 // Arena (Village/Loop) is +X; Hangar Straight is the long +Z run.
@@ -40,13 +40,5 @@ const filleted = filletToLength(SILVERSTONE_CORNERS, SILVERSTONE_LENGTH);
 /** Dense centerline ring: straights plus a tangent arc at every corner. */
 export const SILVERSTONE_WAYPOINTS = filleted.ring;
 
-/** Scale applied to the control polygon to reach the target lap length. */
-export const SILVERSTONE_SCALE = filleted.scale;
-
 /** Start/finish sits on Hamilton Straight, which is where the ring opens. */
 export const SILVERSTONE_SPAWN_T = 0;
-
-/** Kept for the old name; the polygon is now `SILVERSTONE_CORNERS`. */
-export const SILVERSTONE_WAYPOINTS_UNSCALED = SILVERSTONE_CORNERS;
-
-export { ringLength };
