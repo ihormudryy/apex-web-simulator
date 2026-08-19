@@ -10,9 +10,13 @@ export class Car {
     this.root = new THREE.Object3D();
     scene.add(this.root);
 
+    this.visualRoot = new THREE.Object3D();
+    this.visualRoot.rotation.y = DEG90;
+    this.root.add(this.visualRoot);
+
     this.body = new THREE.Object3D();
     this.body.rotation.y = DEG90;
-    this.root.add(this.body);
+    this.visualRoot.add(this.body);
 
     this.lfw = this._makeWheel( 1.3928, 0.34, -0.69);
     this.rfw = this._makeWheel( 1.4,    0.34,  0.69);
@@ -44,7 +48,7 @@ export class Car {
     w.position.set(x, y, z);
     w._spinPivot = new THREE.Object3D();
     w.add(w._spinPivot);
-    this.root.add(w);
+    this.visualRoot.add(w);
     return w;
   }
 
@@ -123,7 +127,7 @@ export class Car {
     shadow.position.set(-0.35, 0.01, 0.08);
     shadow.rotation.x = -Math.PI / 2;
     shadow.rotation.z = -Math.PI / 2;
-    this.root.add(shadow);
+    this.visualRoot.add(shadow);
   }
 
   // Car meshes face -Z at yaw 0, so visual left is +yaw.
