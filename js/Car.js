@@ -122,6 +122,8 @@ export class Car {
       BinLoader.load(`obj/js/${name}.bin`, geo => {
         const mesh = new THREE.Mesh(geo, p.mat);
         mesh.position.set(p.x, p.y, p.z);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         this.body.add(mesh);
       });
     }
@@ -133,10 +135,16 @@ export class Car {
       BinLoader.load(`obj/js/${name}.bin`, geo => {
         const leftGeo  = geo.clone().applyMatrix4(rotLeft);
         const rightGeo = geo.clone().applyMatrix4(rotRight);
-        this.lfw._spinPivot.add(new THREE.Mesh(leftGeo,  mat));
-        this.lrw._spinPivot.add(new THREE.Mesh(leftGeo,  mat));
-        this.rfw._spinPivot.add(new THREE.Mesh(rightGeo, mat));
-        this.rrw._spinPivot.add(new THREE.Mesh(rightGeo, mat));
+        const addWheel = (pivot, geo) => {
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          pivot.add(mesh);
+        };
+        addWheel(this.lfw._spinPivot, leftGeo);
+        addWheel(this.lrw._spinPivot, leftGeo);
+        addWheel(this.rfw._spinPivot, rightGeo);
+        addWheel(this.rrw._spinPivot, rightGeo);
       });
     }
 

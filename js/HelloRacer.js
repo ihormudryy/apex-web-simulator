@@ -1,16 +1,27 @@
 import * as THREE from 'three';
 import Stats from 'three/addons/libs/stats.module.js';
+import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { Car } from './Car.js';
 import { MaterialPanel } from './MaterialPanel.js';
 import { createSilverstone } from './track/Silverstone.js';
 import { nextCameraMode } from './cameraModes.js';
+import {
+  directionFromEquirectUV, sunDirectionFromEquirect, horizonColorFromEquirect,
+} from './render/equirect.js';
+import { outdoorSkyData, DEFAULT_SUN_U, DEFAULT_SUN_V } from './render/outdoorSky.js';
+import { localShadowLightPose, applyLocalShadowPose } from './render/localShadow.js';
 
 const SKY_COLOR = 0xa8d6ff;
 const FOG_NEAR = 250;
 const FOG_FAR = 1400;
-// Comfortably past `fog.far` from anywhere on the 1.8 km circuit, so geometry is
-// always fully fogged before the dome, and the dome is never the visible edge.
-const SKY_RADIUS = 6000;
+// Only has to reach past the ground plane, which extends fog.far beyond the
+// circuit. Everything past FOG_FAR is solid fog colour, so nothing pops in.
+const VIEW_FAR = 6000;
+// Longest frame the simulation and camera will honour, seconds.
+const MAX_FRAME_DT = 0.05;
+const SHADOW_RADIUS = 40;
+const SHADOW_DISTANCE = 90;
+const HDRI_URL = 'obj/textures/sky/kloofendal_48d_partly_cloudy_puresky_2k.hdr';
 
 class HelloRacer {
   constructor() {
@@ -39,6 +50,9 @@ class HelloRacer {
 
     this._forward = new THREE.Vector3();
     this._right = new THREE.Vector3();
+    this._sunDir = new THREE.Vector3();
+    this._key = null;
+    this._envMap = null;
 
     this._lastTime = 0;
     this._animate = this._animate.bind(this);
@@ -48,6 +62,10 @@ class HelloRacer {
     const container = document.getElementById('container');
 
     this.scene = new THREE.Scene();
+    // Fog only tints geometry; the HDRI background is unfogged. Horizon colour
+    // is sampled from the equirect so the ground plane fades into the sky
+    // rather than a mismatched solid blue.
+    this.scene.background = new THREE.Color(SKY_COLOR);
     this.scene.fog = new THREE.Fog(SKY_COLOR, FOG_NEAR, FOG_FAR);
 
     // The circuit is about 1.8 km across, so `far` only has to clear the sky
@@ -55,7 +73,7 @@ class HelloRacer {
     // precision on nothing: at 100 m it could only resolve ~6 cm, while the track
     // ribbons are stacked 2–25 mm apart, which z-fights.
     this.camera = new THREE.PerspectiveCamera(
-      35, window.innerWidth / window.innerHeight, 0.25, SKY_RADIUS * 1.5);
+      35, window.innerWidth / window.innerHeight, 0.25, VIEW_FAR);
     this.camera.position.set(0, 2, 8);
 
     this._setupLights();
@@ -70,7 +88,9 @@ class HelloRacer {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 0.95;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(this.renderer.domElement);
 
     this.stats = new Stats();
@@ -86,7 +106,6 @@ class HelloRacer {
     // The ground has to reach past the fog, or its edge shows on the horizon.
     this.track = createSilverstone({ groundMargin: FOG_FAR * 1.15 });
     this.scene.add(this.track);
-    this.scene.add(this._makeSky());
 
     this._loadEnvironment();
 
@@ -100,72 +119,109 @@ class HelloRacer {
   }
 
   /**
-   * Sky as scene geometry rather than `scene.background`.
-   *
-   * A background `Color` is written straight to the framebuffer and never sees
-   * tone mapping, while `Fog` is applied inside every material's shader and does.
-   * The two therefore cannot agree, and fully fogged distance met the sky at a
-   * hard seam. A dome shaded by the same pipeline as everything else matches by
-   * construction.
+   * Outdoor IBL. Prefers a Polyhaven HDRI if present; otherwise a linear
+   * equirect with a hot sun, so chrome and the shadow light share a direction.
+   * `obj/textures/envmap/` stays unused — it is a dark studio.
    */
-  _makeSky() {
-    const sky = new THREE.Mesh(
-      new THREE.SphereGeometry(SKY_RADIUS, 32, 16),
-      new THREE.MeshBasicMaterial({
-        color: SKY_COLOR,
-        side: THREE.BackSide,
-        fog: false,
-        depthWrite: false,
-      })
-    );
-    sky.renderOrder = -1;
-    // Keeps the horizon at eye level wherever the car is on the circuit.
-    sky.onBeforeRender = (_r, _s, camera) => sky.position.set(camera.position.x, 0, camera.position.z);
-    return sky;
+  _loadEnvironment() {
+    this._applyHdrEnvironment(this._makeOutdoorSkyTexture());
+    this._tryLoadPackedHdri();
+  }
+
+  _tryLoadPackedHdri() {
+    fetch(HDRI_URL).then(response => {
+      if (!response.ok) return null;
+      return response.arrayBuffer();
+    }).then(buffer => {
+      if (!buffer) return;
+      const loader = new HDRLoader().setDataType(THREE.FloatType);
+      const texData = loader.parse(buffer);
+      if (!texData?.width || texData.width < 512) return;
+      const texture = new THREE.DataTexture(texData.data, texData.width, texData.height);
+      texture.type = texData.type;
+      texture.format = THREE.RGBAFormat;
+      texture.colorSpace = texData.colorSpace;
+      texture.minFilter = texData.minFilter;
+      texture.magFilter = texData.magFilter;
+      texture.generateMipmaps = texData.generateMipmaps;
+      texture.flipY = texData.flipY;
+      this._applyHdrEnvironment(texture);
+    }).catch(() => {});
+  }
+
+  _makeOutdoorSkyTexture() {
+    const { data, width, height } = outdoorSkyData();
+    const texture = new THREE.DataTexture(data, width, height);
+    texture.type = THREE.FloatType;
+    texture.format = THREE.RGBAFormat;
+    texture.colorSpace = THREE.LinearSRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    texture.flipY = true;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
+  _applyHdrEnvironment(source) {
+    source.mapping = THREE.EquirectangularReflectionMapping;
+    source.needsUpdate = true;
+    this.scene.background = source;
+
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    const env = pmrem.fromEquirectangular(source).texture;
+    pmrem.dispose();
+    if (this._envMap) this._envMap.dispose();
+    this._envMap = env;
+    this.scene.environment = env;
+    this.scene.environmentIntensity = 1.05;
+    this.renderer.toneMappingExposure = 0.9;
+
+    const img = source.image;
+    if (img && img.data && img.width && img.height) {
+      const sun = sunDirectionFromEquirect(img.data, img.width, img.height);
+      this._sunDir.set(sun.x, sun.y, sun.z);
+      const hz = horizonColorFromEquirect(img.data, img.width, img.height);
+      this.scene.fog.color.setRGB(hz.r / (1 + hz.r), hz.g / (1 + hz.g), hz.b / (1 + hz.b));
+    }
+    this._updateLocalShadow();
   }
 
   /**
-   * Prefiltered environment for every PBR material in the scene.
-   *
-   * `metalness` is a request to reflect the surroundings, so with no environment
-   * a metal renders from direct lights alone: the barriers came out navy on their
-   * shaded face and tan on the lit one, and the chrome and rims were flat. A raw
-   * cube map is also the wrong input for a roughness-aware BRDF — that needs the
-   * PMREM mip chain. Assigning `scene.environment` reaches every standard and
-   * physical material at once, so nothing has to carry its own `envMap`.
+   * Key light is the same sun the HDRI shows, and its shadow frustum is a
+   * 80 m square around the car — a map over the whole circuit would be mush.
+   * Sky fill comes from `scene.environment`; a weak rim keeps the shaded
+   * body from going flat in the onboard cameras.
    */
-  _loadEnvironment() {
-    const cube = new THREE.CubeTextureLoader().load(
-      ['right', 'left', 'top', 'bottom', 'front', 'back']
-        .map(f => `obj/textures/envmap/envmap_${f}.jpg`),
-      loaded => {
-        // The JPEGs only decode after `load` returns, so prefilter on the callback.
-        const pmrem = new THREE.PMREMGenerator(this.renderer);
-        this.scene.environment = pmrem.fromCubemap(loaded).texture;
-        pmrem.dispose();
-      },
-      undefined,
-      err => console.error('Environment map failed to load', err)
-    );
-    // JPEGs are sRGB-encoded; without this they are decoded as linear and the
-    // reflections come back washed out.
-    cube.colorSpace = THREE.SRGBColorSpace;
+  _setupLights() {
+    const sun = directionFromEquirectUV(DEFAULT_SUN_U, DEFAULT_SUN_V);
+    this._sunDir.set(sun.x, sun.y, sun.z);
+
+    const key = new THREE.DirectionalLight(0xfff1d0, 1.55);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.bias = -0.00035;
+    key.shadow.normalBias = 0.04;
+    this.scene.add(key);
+    this.scene.add(key.target);
+    this._key = key;
+    this._updateLocalShadow();
+
+    const rim = new THREE.DirectionalLight(0xbcd8ff, 0.22);
+    rim.position.set(-35, 30, -55);
+    this.scene.add(rim);
   }
 
-  _setupLights() {
-    this.scene.add(new THREE.HemisphereLight(0xcce6ff, 0x4a6a3f, 0.9));
-
-    const key = new THREE.DirectionalLight(0xfff1d0, 2.7);
-    key.position.set(40, 90, 25);
-    this.scene.add(key);
-
-    const back = new THREE.DirectionalLight(0x9fc0ff, 0.9);
-    back.position.set(-35, 30, -55);
-    this.scene.add(back);
-
-    const fill = new THREE.DirectionalLight(0xffffff, 0.5);
-    fill.position.set(0, 18, 35);
-    this.scene.add(fill);
+  _updateLocalShadow() {
+    if (!this._key) return;
+    const p = this.car ? this.car.root.position : { x: 0, y: 0, z: 0 };
+    applyLocalShadowPose(
+      this._key,
+      localShadowLightPose(p, this._sunDir, {
+        distance: SHADOW_DISTANCE,
+        radius: SHADOW_RADIUS,
+      })
+    );
   }
 
   _setupMouseControls() {
@@ -217,11 +273,15 @@ class HelloRacer {
     requestAnimationFrame(this._animate);
 
     const now = performance.now();
-    const dt = (now - this._lastTime) * 0.001;
+    // Clamped once, here. A backgrounded tab or a long asset stall hands over a
+    // multi-second delta; unclamped that slams the steering to full lock and
+    // teleports the camera, since both integrate against dt directly.
+    const dt = Math.min((now - this._lastTime) * 0.001, MAX_FRAME_DT);
     this._lastTime = now;
 
     this.car.updateSteering(dt);
     this.car.updatePhysics(dt, this.track);
+    this._updateLocalShadow();
     this._updateCamera(dt);
 
     this.renderer.render(this.scene, this.camera);
@@ -398,4 +458,9 @@ class HelloRacer {
   }
 }
 
-new HelloRacer().init();
+const racer = new HelloRacer();
+racer.init();
+
+// Handle for the console and for the browser smoke checks: there is no other way
+// to reach the live scene, camera or vehicle state from outside the module.
+window.racer = racer;
