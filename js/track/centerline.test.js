@@ -39,3 +39,19 @@ test('Silverstone GP length is 5.891 km ± 5%', () => {
   const c = buildCenterline(SILVERSTONE_WAYPOINTS, 4000);
   assert.ok(c.length > 5596 && c.length < 6186, `length ${c.length}`);
 });
+
+test('Silverstone Hamilton Straight has continuous spawn tangents', () => {
+  const n = SILVERSTONE_WAYPOINTS.length;
+  const last = SILVERSTONE_WAYPOINTS[n - 1];
+  const ham = SILVERSTONE_WAYPOINTS[0];
+  const abb = SILVERSTONE_WAYPOINTS[1];
+  const unit = (a, b) => {
+    const dx = b.x - a.x, dz = b.z - a.z;
+    const len = Math.hypot(dx, dz) || 1;
+    return { x: dx / len, z: dz / len };
+  };
+  const tIn = unit(last, ham);
+  const tOut = unit(ham, abb);
+  const dot = tIn.x * tOut.x + tIn.z * tOut.z;
+  assert.ok(dot > 0.99, `spawn tangent dot ${dot}`);
+});

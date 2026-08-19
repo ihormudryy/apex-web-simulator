@@ -23,7 +23,7 @@ export const SILVERSTONE_WAYPOINTS_UNSCALED = [
   { x:  640, z:-1280, halfWidth: 7.5, runoff: 24 }, // Stowe
   { x:  820, z:-1120, halfWidth: 7.0, runoff: 16 }, // Vale
   { x:  880, z: -820, halfWidth: 7.5, runoff: 20 }, // Club
-  { x:  860, z: -400, halfWidth: 8.5, runoff: 14 },
+  { x:  860, z:  300, halfWidth: 8.5, runoff: 14 }, // Hamilton Straight approach from Club
 ];
 
 const TARGET = 5891;
