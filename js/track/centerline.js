@@ -48,7 +48,7 @@ export function buildCenterline(waypoints, sampleCount = 4000) {
       for (let i = 0; i < lim; i++) consider(i);
     }
     const s = samples[bestI];
-    const lateral = (qx - s.x) * s.nx + (qz - s.z) * s.nz;
+    const lateral = -((qx - s.x) * s.nx + (qz - s.z) * s.nz);
     const ad = Math.abs(lateral);
     const surface = ad < s.halfWidth ? 'tarmac' : ad < s.halfWidth + 1 ? 'kerb' : 'grass';
     return {

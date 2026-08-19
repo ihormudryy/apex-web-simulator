@@ -25,3 +25,11 @@ test('on-center is tarmac, 7m off is kerb, 20m off is grass', () => {
   assert.equal(grass.surface, 'grass');
   assert.ok(grass.wallLimit > 10);
 });
+
+test('lateral positive is right of +X travel on bottom edge', () => {
+  const c = buildCenterline(box, 400);
+  const left = c.query(50, 6.5);
+  assert.ok(left.lateral < 0, 'left of travel should be negative lateral');
+  const right = c.query(50, -6.5);
+  assert.ok(right.lateral > 0, 'right of travel should be positive lateral');
+});
