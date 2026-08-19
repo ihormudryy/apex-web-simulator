@@ -5,6 +5,7 @@ import {
   createVehicle, advance, updateSteering, resolvePedals,
   forwardSpeed, lateralSpeed, travelYaw, speed, REVERSE_THRESHOLD,
 } from './vehicle.js';
+import { WB } from './bicycle.js';
 
 const DT = 1 / 60;
 const flat = {
@@ -119,4 +120,58 @@ test('non-finite state snaps back to the spawn pose', () => {
   assert.equal(car.resets, 1);
   assert.deepEqual([car.x, car.z, car.yaw], [10, 20, 0.5]);
   assert.equal(car.vx, 0);
+});
+
+test('a stopped car does not rotate however the wheel is turned', () => {
+  // Turning the wheel used to add `steer` to the slip angle as a flat term, so a
+  // turned front tyre made its full 5.7 kN of lateral force at any speed at all.
+  // With no momentum to resist it, a car rolling to a stop with lock on pivoted
+  // on the spot instead of coming to rest.
+  for (const held of [{ left: true }, { right: true },
+                      { left: true, brake: true }, { right: true, forward: false }]) {
+    const car = launched(40);
+    const idle = keys();
+    for (let f = 0; f < 60 * 40; f++) {          // coast to a standstill
+      updateSteering(car, idle, DT);
+      advance(car, idle, flat, DT);
+    }
+    assert.ok(Math.abs(forwardSpeed(car)) < 0.01, `did not stop: ${forwardSpeed(car)}`);
+
+    const input = keys(held);
+    const yaw0 = car.yaw;
+    let peakRate = 0;
+    for (let f = 0; f < 60 * 20; f++) {
+      updateSteering(car, input, DT);
+      advance(car, input, flat, DT);
+      peakRate = Math.max(peakRate, Math.abs(car.av));
+    }
+    const spun = Math.abs(car.yaw - yaw0) * 180 / Math.PI;
+    const label = Object.keys(held).join('+');
+    assert.ok(spun < 0.5, `${label} rotated a stopped car by ${spun.toFixed(2)}°`);
+    assert.ok(peakRate * 180 / Math.PI < 1, `${label} reached ${(peakRate * 180 / Math.PI).toFixed(1)}°/s at a standstill`);
+  }
+});
+
+test('creeping with the wheel turned follows the Ackermann arc', () => {
+  // The counterpart to the test above: at a crawl the car should still steer, and
+  // steer by the amount the geometry dictates rather than pivoting.
+  const car = launched(0);
+  const blip = keys({ forward: true, left: true });
+  for (let f = 0; f < 12; f++) { updateSteering(car, blip, DT); advance(car, blip, flat, DT); }
+
+  const input = keys({ left: true });
+  let checked = 0;
+  for (let f = 0; f < 60 * 6; f++) {
+    updateSteering(car, input, DT);
+    advance(car, input, flat, DT);
+    const v = forwardSpeed(car);
+    if (v < 0.3 || v > 2.5) continue;
+    const ackermann = v * Math.tan(Math.abs(car.steerAngle)) / WB;
+    if (ackermann < 1e-4) continue;
+    const ratio = Math.abs(car.av) / ackermann;
+    assert.ok(ratio > 0.85 && ratio < 1.2,
+      `at ${v.toFixed(2)} m/s the yaw rate was ${ratio.toFixed(2)}x the Ackermann rate`);
+    checked++;
+  }
+  assert.ok(checked > 100, `only ${checked} samples fell in the crawl band`);
 });

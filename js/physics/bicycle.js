@@ -112,10 +112,22 @@ export function step(state, input, sample, dt) {
   const dLatR = mu * FzR;
 
   const vxMag = Math.max(Math.abs(vx), V_RELAX);
-  const vxSign = Math.abs(vx) < 0.05 ? 0 : Math.sign(vx);
   // +av is Three.js yaw-left (rotation.y). Front then moves toward -y, rear toward +y.
-  const alphaF = Math.atan2(vy - av * LF, vxMag) + vxSign * steer;
-  const alphaR = Math.atan2(vy + av * LR, vxMag);
+  const frontLat = vy - av * LF;
+  const rearLat = vy + av * LR;
+
+  // Slip angle in the steered wheel's own frame. Adding `steer` to the slip angle
+  // as a flat term instead made a turned wheel produce its full lateral force at
+  // any speed at all — 5.7 kN at walking pace, the same as at 40 m/s — so a car
+  // rolling to a stop with lock on pivoted on the spot instead of coming to rest.
+  // The steer's real contribution to slip is `vx·sin δ`, which fades with speed.
+  const sinSteer = Math.sin(steer);
+  const cosSteer = Math.cos(steer);
+  const wheelLat = vx * sinSteer + frontLat * cosSteer;
+  const wheelLong = vx * cosSteer - frontLat * sinSteer;
+
+  const alphaF = Math.atan2(wheelLat, Math.max(Math.abs(wheelLong), V_RELAX));
+  const alphaR = Math.atan2(rearLat, vxMag);
 
   const FyF = pacejkaFy(dLatF, alphaF);
   const FyR = pacejkaFy(dLatR, alphaR);
