@@ -3,9 +3,9 @@ import { buildCenterline } from './centerline.js';
 // Approximate GP loop, metres, clockwise from Hamilton Straight toward Abbey.
 // Arena (Village/Loop) is +X; Hangar Straight is the long +Z run.
 export const SILVERSTONE_WAYPOINTS_UNSCALED = [
-  { x:  820, z:   40, halfWidth: 8.5, runoff: 14 }, // Hamilton Straight
+  { x:  820, z:-326.6667, halfWidth: 8.5, runoff: 14 }, // Hamilton Straight
   { x:  780, z: -220, halfWidth: 7.5, runoff: 16 }, // Abbey
-  { x:  700, z: -380, halfWidth: 7.0, runoff: 14 }, // Farm
+  { x:  650, z: -180, halfWidth: 7.0, runoff: 14 }, // Farm
   { x:  520, z: -470, halfWidth: 7.0, runoff: 12 }, // Village
   { x:  310, z: -430, halfWidth: 6.5, runoff: 6  }, // The Loop
   { x:  280, z: -280, halfWidth: 7.0, runoff: 12 }, // Aintree
@@ -23,7 +23,7 @@ export const SILVERSTONE_WAYPOINTS_UNSCALED = [
   { x:  640, z:-1280, halfWidth: 7.5, runoff: 24 }, // Stowe
   { x:  820, z:-1120, halfWidth: 7.0, runoff: 16 }, // Vale
   { x:  880, z: -820, halfWidth: 7.5, runoff: 20 }, // Club
-  { x:  860, z:  300, halfWidth: 8.5, runoff: 14 }, // Hamilton Straight approach from Club
+  { x:  840, z: -380, halfWidth: 8.5, runoff: 14 }, // Hamilton Straight approach from Club
 ];
 
 const TARGET = 5891;

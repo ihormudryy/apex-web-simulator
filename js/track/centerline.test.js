@@ -55,3 +55,36 @@ test('Silverstone Hamilton Straight has continuous spawn tangents', () => {
   const dot = tIn.x * tOut.x + tIn.z * tOut.z;
   assert.ok(dot > 0.99, `spawn tangent dot ${dot}`);
 });
+
+test('Silverstone ring has no tangent reversals', () => {
+  const c = buildCenterline(SILVERSTONE_WAYPOINTS, 4000);
+  for (let i = 0; i < c.samples.length; i++) {
+    const a = c.samples[i];
+    const b = c.samples[(i + 1) % c.samples.length];
+    const dot = a.tx * b.tx + a.tz * b.tz;
+    // The parked 21-waypoint, piecewise-linear design has intentional corner
+    // kinks below 0.9. Until I2 adds curve vertices, reject every reversal.
+    assert.ok(dot > 0, `tangent reversal at sample ${i}: dot=${dot}`);
+  }
+});
+
+test('Silverstone distant sections stay more than a track width apart', () => {
+  const c = buildCenterline(SILVERSTONE_WAYPOINTS, 2000);
+  const spacing = c.length / c.samples.length;
+  const maxHalfWidth = Math.max(...c.samples.map(s => s.halfWidth));
+  const neighborhood = Math.ceil(60 / spacing);
+  let minDistance = Infinity;
+
+  for (let i = 0; i < c.samples.length; i++) {
+    for (let j = i + 1; j < c.samples.length; j++) {
+      const ringGap = Math.min(j - i, c.samples.length - (j - i));
+      if (ringGap <= neighborhood) continue;
+      const a = c.samples[i];
+      const b = c.samples[j];
+      minDistance = Math.min(minDistance, Math.hypot(a.x - b.x, a.z - b.z));
+    }
+  }
+
+  assert.ok(minDistance > 2 * maxHalfWidth,
+    `minimum self-approach ${minDistance} <= ${2 * maxHalfWidth}`);
+});
