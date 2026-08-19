@@ -164,8 +164,8 @@ export class Car {
     const vz = -this.cvel.x;
     const vDotN = vx * nx + vz * nz;
     if (vDotN * sign > 0) {
-      this.cvel.y -= sign * vDotN * nx * 1.2;
-      this.cvel.x += sign * vDotN * nz * 1.2;
+      this.cvel.y -= vDotN * nx * 1.2;
+      this.cvel.x += vDotN * nz * 1.2;
       this.av *= 0.5;
     }
   }
@@ -188,8 +188,14 @@ export class Car {
   }
 
   _rotateYaw(localX, localY, sinY, cosY, out) {
-    out.x =  cosY * localY + sinY * localX;
-    out.y = -sinY * localY + cosY * localX;
+    out.x =  cosY * localX + sinY * localY;
+    out.y = -sinY * localX + cosY * localY;
+    return out;
+  }
+
+  _worldToLocal(cvelX, cvelY, sinY, cosY, out) {
+    out.x = cosY * cvelX - sinY * cvelY;
+    out.y = sinY * cvelX + cosY * cvelY;
     return out;
   }
 
@@ -213,7 +219,7 @@ export class Car {
         const gy = this.root.rotation.y;
         const sinY = Math.sin(gy);
         const cosY = Math.cos(gy);
-        const vel = this._rotateYaw(this.cvel.x, this.cvel.y, sinY, cosY, this._vel);
+        const vel = this._worldToLocal(this.cvel.x, this.cvel.y, sinY, cosY, this._vel);
         const sample = track.query(this.root.position.x, this.root.position.z);
         this._trackHint = sample.index;
 
