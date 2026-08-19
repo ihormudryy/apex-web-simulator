@@ -5,6 +5,7 @@ import { Car } from './Car.js';
 import { MaterialPanel } from './MaterialPanel.js';
 import { createSilverstone } from './track/Silverstone.js';
 import { nextCameraMode } from './cameraModes.js';
+import { EngineAudio } from './audio/EngineAudio.js';
 import { Dashboard } from './dash/Dashboard.js';
 import { createTelemetry } from './dash/telemetry.js';
 import { CSM } from 'three/addons/csm/CSM.js';
@@ -40,6 +41,7 @@ class HelloRacer {
     this.track = null;
     this.dashboard = null;
     this.telemetry = null;
+    this.engineAudio = new EngineAudio();
     this._camRadius = 7.5;
     this._pitch = 0.32;
     this._yaw = 0;
@@ -123,6 +125,10 @@ class HelloRacer {
     document.addEventListener('keyup', e => this._onKeyUp(e));
 
     this._setupMouseControls();
+    // A live AudioContext needs a user gesture; either input counts.
+    const unlockAudio = () => this.engineAudio.unlock();
+    document.addEventListener('pointerdown', unlockAudio, { once: true });
+    document.addEventListener('keydown', unlockAudio, { once: true });
 
     // The ground has to reach past the fog, or its edge shows on the horizon.
     this.track = createSilverstone({ groundMargin: FOG_FAR * 1.15 });
@@ -359,9 +365,9 @@ class HelloRacer {
     this.stats.update();
 
     // After the render, so a slow dashboard frame never holds up the picture.
-    if (this.dashboard.visible) {
-      this.dashboard.update(this.telemetry.sample(this.car, this.track, dt), dt);
-    }
+    const snap = this.telemetry.sample(this.car, this.track, dt);
+    this.engineAudio.update(snap);
+    if (this.dashboard.visible) this.dashboard.update(snap, dt);
   }
 
   _lerpAngle(a, b, t) {

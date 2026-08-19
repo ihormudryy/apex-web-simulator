@@ -17,6 +17,8 @@ export const SHIFT_RPM = 14200;
 export const REDLINE_RPM = 15000;
 /** First shift light comes on here. */
 export const LIGHTS_FROM_RPM = 11500;
+/** Power-on downshift: hold a taller gear until the engine is this slow. */
+export const DOWNSHIFT_RPM = 8200;
 
 const CIRCUMFERENCE = 2 * Math.PI * WHEEL_RADIUS;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -39,6 +41,31 @@ export function rpmFor(speedMs, gear) {
 export function gearFor(speedMs) {
   let gear = 1;
   while (gear < RATIOS.length && rpmFor(speedMs, gear) > SHIFT_RPM) gear++;
+  return gear;
+}
+
+/**
+ * Sequential box with hysteresis. `gearFor` always picks the shortest legal
+ * ratio, so a lift-off downshift slams the revs back up. This holds the current
+ * gear while coasting and only shortens on power once rpm has fallen.
+ *
+ * @param {number} prev 1-based gear from the last frame
+ * @param {number} speedMs
+ * @param {{ throttle?: number }} [load]
+ */
+export function advanceGear(prev, speedMs, { throttle = 0 } = {}) {
+  const max = RATIOS.length;
+  if (Math.abs(speedMs) < 0.35) return 1;
+  let gear = clamp(prev || 1, 1, max);
+
+  while (gear < max && rpmFor(speedMs, gear) > SHIFT_RPM) gear++;
+
+  if (throttle > 0.22) {
+    while (gear > 1 && rpmFor(speedMs, gear) < DOWNSHIFT_RPM) {
+      if (rpmFor(speedMs, gear - 1) > SHIFT_RPM) break;
+      gear--;
+    }
+  }
   return gear;
 }
 

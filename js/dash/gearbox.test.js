@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   RATIOS, IDLE_RPM, SHIFT_RPM, REDLINE_RPM, LIGHTS_FROM_RPM,
-  rpmFor, gearFor, shiftFraction,
+  rpmFor, gearFor, shiftFraction, advanceGear,
 } from './gearbox.js';
 
 test('gear never falls as speed rises', () => {
@@ -73,3 +73,22 @@ test('reverse and standstill read as idle, not as a stalled engine', () => {
   assert.equal(rpmFor(0, 1), IDLE_RPM);
   assert.equal(rpmFor(-5, 1), rpmFor(5, 1));
 });
+
+test('coasting does not downshift as speed falls', () => {
+  const v0 = 70;
+  let gear = gearFor(v0);
+  assert.ok(gear >= 6, `top-end gear ${gear}`);
+  for (let v = v0; v >= 20; v -= 2) {
+    const next = advanceGear(gear, v, { throttle: 0 });
+    assert.ok(next >= gear, `coasted from ${gear} to ${next} at ${v} m/s`);
+    gear = next;
+  }
+});
+
+test('power-on at low speed does downshift after the revs have fallen', () => {
+  const held = advanceGear(8, 25, { throttle: 0 });
+  assert.equal(held, 8);
+  const pull = advanceGear(8, 25, { throttle: 1 });
+  assert.ok(pull < 8, `still in ${pull} after asking for drive at 25 m/s`);
+});
+
