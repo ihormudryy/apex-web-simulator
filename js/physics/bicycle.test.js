@@ -57,3 +57,49 @@ test('reverse steering reverses lateral and yaw response', () => {
   assert.ok(f.fy * r.fy < 0, `fy same sign: forward=${f.fy} reverse=${r.fy}`);
   assert.ok(f.av * r.av < 0, `yaw same sign: forward=${f.av} reverse=${r.av}`);
 });
+
+test('steady left steer curves left without excessive sideslip', () => {
+  const dt = 1 / 240;
+  const steer = 18 * Math.PI / 180;
+  let state = { vx: 40, vy: 0, av: 0, axPrev: 0 };
+  let worldVx = 0;
+  let worldVz = -40;
+  let x = 0;
+  let z = 0;
+  let yaw = 0;
+
+  for (let i = 0; i < 3 / dt; i++) {
+    const sinY = Math.sin(yaw);
+    const cosY = Math.cos(yaw);
+    state = {
+      ...state,
+      vx: cosY * -worldVz - sinY * worldVx,
+      vy: sinY * -worldVz + cosY * worldVx,
+    };
+    const result = step(state,
+      { throttle: 0, brake: false, steer }, tarmac, dt);
+
+    const ax = (result.vx - state.vx) / dt;
+    const ay = (result.vy - state.vy) / dt;
+    worldVz -= dt * (cosY * ax + sinY * ay);
+    worldVx += dt * (-sinY * ax + cosY * ay);
+    x += dt * worldVx;
+    z += dt * worldVz;
+    yaw += dt * result.av;
+
+    state = {
+      vx: result.vx,
+      vy: result.vy,
+      av: result.av,
+      axPrev: result.axPrev,
+    };
+  }
+
+  const sideslip = Math.atan2(
+    Math.sin(yaw) * -worldVz + Math.cos(yaw) * worldVx,
+    Math.cos(yaw) * -worldVz - Math.sin(yaw) * worldVx,
+  );
+  assert.ok(x < -20, `left steer should curve toward -X, x=${x}, z=${z}`);
+  assert.ok(Math.abs(sideslip) < 15 * Math.PI / 180,
+    `sideslip=${sideslip * 180 / Math.PI}°`);
+});
