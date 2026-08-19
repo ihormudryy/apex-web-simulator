@@ -26,6 +26,21 @@ const FOG_FAR = 1400;
 const VIEW_FAR = 6000;
 // Longest frame the simulation and camera will honour, seconds.
 const MAX_FRAME_DT = 0.05;
+
+// Rear chase camera. Everything speed-dependent here is deliberately gentle: the
+// boom used to grow 5.5 m while the lens widened 13 degrees, and the two together
+// made the car render about 2.4x smaller at 300 km/h than at a standstill. The
+// sense of speed comes from the ground going past, not from backing away from it.
+const CHASE_DISTANCE = 5.2;          // metres behind the car, at rest
+const CHASE_SPEED_PULLBACK = 0.6;    // extra metres by the reference speed
+const CHASE_LOOK_AHEAD = 0.8;        // metres ahead of the car to aim at, at rest
+const CHASE_LOOK_AHEAD_FAR = 4.0;    // and by the reference speed
+const CHASE_LOOK_HEIGHT = 0.75;      // metres up the car to aim at
+const CHASE_PITCH = 0.24;            // radians above the car
+const CHASE_HEIGHT_BIAS = 0.38;      // metres of lift on top of the boom's own rise
+const CHASE_FOV_GAIN = 5;            // degrees of extra field of view at speed
+const CHASE_REFERENCE_SPEED = 80;    // m/s, near the car's top speed
+const CHASE_FOLLOW_STIFFNESS = 0.02; // lower follows harder; 0.08 lagged ~0.4 s
 const SHADOW_RADIUS = 40;
 const SHADOW_DISTANCE = 90;
 const HDRI_URL = 'obj/textures/sky/kloofendal_48d_partly_cloudy_puresky_2k.hdr';
@@ -42,13 +57,15 @@ class HelloRacer {
     this.dashboard = null;
     this.telemetry = null;
     this.engineAudio = new EngineAudio();
-    this._camRadius = 7.5;
-    this._pitch = 0.32;
+    this._camRadius = CHASE_DISTANCE;
+    this._pitch = CHASE_PITCH;
     this._yaw = 0;
     this._panOffset = new THREE.Vector3();
     this._camTarget = new THREE.Vector3();
     this._camPos = new THREE.Vector3();
     this._lookSmoothed = new THREE.Vector3();
+    this._camOffset = new THREE.Vector3();
+    this._lookOffset = new THREE.Vector3();
     this._followYaw = 0;
     this._camRoll = 0;
     this._chaseReady = false;
@@ -442,38 +459,51 @@ class HelloRacer {
       this._followYaw = this._lerpAngle(this._followYaw, targetFollowYaw, 1 - Math.pow(yawStiffness, dt));
     }
 
-    const dist = this._camRadius + THREE.MathUtils.clamp(speed * 0.11, 0, 5.5);
+    const speedFraction = THREE.MathUtils.clamp(speed / CHASE_REFERENCE_SPEED, 0, 1);
+    const dist = this._camRadius + CHASE_SPEED_PULLBACK * speedFraction;
     const hDist = dist * Math.cos(this._pitch);
     const vDist = dist * Math.sin(this._pitch);
 
-    const lookAhead = THREE.MathUtils.clamp(3.2 + Math.max(0, fwdSpeed) * 0.22, 3.2, 12);
+    // Aiming far ahead pushes the car down and back in frame, which reads as
+    // distance even when the boom has not moved.
+    const lookAhead = CHASE_LOOK_AHEAD + (CHASE_LOOK_AHEAD_FAR - CHASE_LOOK_AHEAD)
+      * THREE.MathUtils.clamp(Math.max(0, fwdSpeed) / CHASE_REFERENCE_SPEED, 0, 1);
     car.headingForwardAt(this._lerpAngle(this._followYaw, facingYaw, 0.35), this._forward);
 
     this._camTarget.set(
-      pos.x + this._forward.x * lookAhead + this._panOffset.x,
-      pos.y + 0.95 + this._panOffset.y,
-      pos.z + this._forward.z * lookAhead + this._panOffset.z
+      this._forward.x * lookAhead + this._panOffset.x,
+      CHASE_LOOK_HEIGHT + this._panOffset.y,
+      this._forward.z * lookAhead + this._panOffset.z
     );
 
     // Directly opposite `headingForwardAt(followYaw)`, which is
     // (-sin, -cos): the boom is therefore (+sin, +cos). Negating x instead put
     // the camera off to one side at every heading but 0 and 180 degrees.
+    // Both of these are offsets from the car, not world positions, because they
+    // are about to be smoothed. Smoothing a world position against a moving car
+    // leaves a first-order lag of speed x time-constant: at 200 km/h that was
+    // 14 m of pure lag on top of a 5.6 m boom, which is most of why the camera
+    // appeared to back away as the car sped up. Smoothing the offset instead
+    // tracks the car's travel rigidly and still eases changes of boom direction,
+    // length and pitch, which is all that wanted easing.
     this._camPos.set(
-      pos.x + hDist * Math.sin(this._followYaw) + this._panOffset.x,
-      pos.y + vDist + 0.45 + this._panOffset.y,
-      pos.z + hDist * Math.cos(this._followYaw) + this._panOffset.z
+      hDist * Math.sin(this._followYaw) + this._panOffset.x,
+      vDist + CHASE_HEIGHT_BIAS + this._panOffset.y,
+      hDist * Math.cos(this._followYaw) + this._panOffset.z
     );
 
-    const posStiffness = this._dragButton === 0 ? 0.001 : 0.08;
-    const lookStiffness = 0.018;
+    const posStiffness = this._dragButton === 0 ? 0.001 : CHASE_FOLLOW_STIFFNESS;
+    const lookStiffness = 0.05;
     if (!this._chaseReady) {
-      this.camera.position.copy(this._camPos);
-      this._lookSmoothed.copy(this._camTarget);
+      this._camOffset.copy(this._camPos);
+      this._lookOffset.copy(this._camTarget);
       this._chaseReady = true;
     } else {
-      this.camera.position.lerp(this._camPos, 1 - Math.pow(posStiffness, dt));
-      this._lookSmoothed.lerp(this._camTarget, 1 - Math.pow(lookStiffness, dt));
+      this._camOffset.lerp(this._camPos, 1 - Math.pow(posStiffness, dt));
+      this._lookOffset.lerp(this._camTarget, 1 - Math.pow(lookStiffness, dt));
     }
+    this.camera.position.copy(pos).add(this._camOffset);
+    this._lookSmoothed.copy(pos).add(this._lookOffset);
 
     const targetRoll = THREE.MathUtils.clamp(-car.steerAngle * 0.28 - car.av * 0.06, -0.12, 0.12);
     this._camRoll = this._expLerp(this._camRoll, this._dragButton === -1 ? targetRoll : 0, 0.05, dt);
@@ -481,7 +511,7 @@ class HelloRacer {
     this.camera.lookAt(this._lookSmoothed);
     this.camera.rotateZ(this._camRoll);
 
-    const targetFov = this._baseFov + THREE.MathUtils.clamp(speed / 38, 0, 1) * 13;
+    const targetFov = this._baseFov + CHASE_FOV_GAIN * speedFraction;
     const nextFov = this._expLerp(this.camera.fov, targetFov, 0.04, dt);
     if (Math.abs(nextFov - this.camera.fov) > 0.02) {
       this.camera.fov = nextFov;
