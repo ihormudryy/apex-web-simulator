@@ -1,4 +1,9 @@
 // js/track/centerline.js
+//
+// Resamples a closed polyline into evenly spaced stations and answers "where am
+// I relative to the road?" for any world XZ point. Deliberately free of Three.js
+// so the physics and its tests can use it directly.
+
 export function buildCenterline(waypoints, sampleCount = 4000) {
   const n = waypoints.length;
   const accum = [0];
@@ -9,9 +14,11 @@ export function buildCenterline(waypoints, sampleCount = 4000) {
   }
   const length = accum[n];
   const samples = new Array(sampleCount);
+  // `s` climbs monotonically, so the segment cursor only ever moves forward:
+  // walking it alongside keeps this O(n + sampleCount) for dense rings.
+  let seg = 0;
   for (let i = 0; i < sampleCount; i++) {
     const s = (i / sampleCount) * length;
-    let seg = 0;
     while (seg < n - 1 && accum[seg + 1] < s) seg++;
     const a = waypoints[seg], b = waypoints[(seg + 1) % n];
     const span = accum[seg + 1] - accum[seg] || 1;
@@ -28,6 +35,8 @@ export function buildCenterline(waypoints, sampleCount = 4000) {
       t: i / sampleCount,
     };
   }
+
+  const spacing = length / sampleCount;
 
   function query(qx, qz, hintIndex = 0) {
     const lim = samples.length;
@@ -63,5 +72,42 @@ export function buildCenterline(waypoints, sampleCount = 4000) {
     };
   }
 
-  return { samples, length, query };
+  return { samples, length, spacing, query };
+}
+
+/**
+ * Radius of the tightest turn the centerline makes, in metres.
+ *
+ * This is the number that decides whether the circuit is driveable at all: a
+ * turn of `dθ` over `ds` metres demands `v²·dθ/ds` of lateral acceleration, so
+ * a zero radius is a wall at any speed.
+ *
+ * Measured over a car length rather than station-to-station. Arcs reach the
+ * station table as chords, and whether a station happens to straddle one chord
+ * junction or two is an artefact of the tessellation, not of the road.
+ */
+export function minCurvatureRadius(centerline, baseline = 4) {
+  const { samples, spacing } = centerline;
+  const w = Math.max(1, Math.round(baseline / spacing));
+  const span = w * spacing;
+  let tightest = Infinity;
+  for (let i = 0; i < samples.length; i++) {
+    const a = samples[i], b = samples[(i + w) % samples.length];
+    const dot = Math.max(-1, Math.min(1, a.tx * b.tx + a.tz * b.tz));
+    const turn = Math.acos(dot);
+    if (turn > 1e-9) tightest = Math.min(tightest, span / turn);
+  }
+  return tightest;
+}
+
+/** Largest heading change between adjacent stations, in radians. */
+export function maxTangentJump(centerline) {
+  const { samples } = centerline;
+  let worst = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const a = samples[i], b = samples[(i + 1) % samples.length];
+    const dot = Math.max(-1, Math.min(1, a.tx * b.tx + a.tz * b.tz));
+    worst = Math.max(worst, Math.acos(dot));
+  }
+  return worst;
 }

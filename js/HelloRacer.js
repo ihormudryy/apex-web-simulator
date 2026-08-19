@@ -5,6 +5,13 @@ import { MaterialPanel } from './MaterialPanel.js';
 import { createSilverstone } from './track/Silverstone.js';
 import { nextCameraMode } from './cameraModes.js';
 
+const SKY_COLOR = 0xa8d6ff;
+const FOG_NEAR = 250;
+const FOG_FAR = 1400;
+// Comfortably past `fog.far` from anywhere on the 1.8 km circuit, so geometry is
+// always fully fogged before the dome, and the dome is never the visible edge.
+const SKY_RADIUS = 6000;
+
 class HelloRacer {
   constructor() {
     this.scene = null;
@@ -41,10 +48,14 @@ class HelloRacer {
     const container = document.getElementById('container');
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0xa8d6ff);
-    this.scene.fog = new THREE.Fog(0xa8d6ff, 250, 1400);
+    this.scene.fog = new THREE.Fog(SKY_COLOR, FOG_NEAR, FOG_FAR);
 
-    this.camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.01, 200000);
+    // The circuit is about 1.8 km across, so `far` only has to clear the sky
+    // dome. The old 0.01–200000 range spent essentially all of its depth
+    // precision on nothing: at 100 m it could only resolve ~6 cm, while the track
+    // ribbons are stacked 2–25 mm apart, which z-fights.
+    this.camera = new THREE.PerspectiveCamera(
+      35, window.innerWidth / window.innerHeight, 0.25, SKY_RADIUS * 1.5);
     this.camera.position.set(0, 2, 8);
 
     this._setupLights();
@@ -63,8 +74,8 @@ class HelloRacer {
     container.appendChild(this.renderer.domElement);
 
     this.stats = new Stats();
-    this.stats.domElement.style.cssText = 'position:absolute;top:0;z-index:100';
-    container.appendChild(this.stats.domElement);
+    this.stats.dom.style.cssText = 'position:absolute;top:0;z-index:100';
+    container.appendChild(this.stats.dom);
 
     window.addEventListener('resize', () => this._onResize());
     document.addEventListener('keydown', e => this._onKeyDown(e));
@@ -72,8 +83,12 @@ class HelloRacer {
 
     this._setupMouseControls();
 
-    this.track = createSilverstone();
+    // The ground has to reach past the fog, or its edge shows on the horizon.
+    this.track = createSilverstone({ groundMargin: FOG_FAR * 1.15 });
     this.scene.add(this.track);
+    this.scene.add(this._makeSky());
+
+    this._loadEnvironment();
 
     this.car = new Car(this.scene);
     this.car.loadAssets();
@@ -82,6 +97,59 @@ class HelloRacer {
 
     this._lastTime = performance.now();
     this._animate();
+  }
+
+  /**
+   * Sky as scene geometry rather than `scene.background`.
+   *
+   * A background `Color` is written straight to the framebuffer and never sees
+   * tone mapping, while `Fog` is applied inside every material's shader and does.
+   * The two therefore cannot agree, and fully fogged distance met the sky at a
+   * hard seam. A dome shaded by the same pipeline as everything else matches by
+   * construction.
+   */
+  _makeSky() {
+    const sky = new THREE.Mesh(
+      new THREE.SphereGeometry(SKY_RADIUS, 32, 16),
+      new THREE.MeshBasicMaterial({
+        color: SKY_COLOR,
+        side: THREE.BackSide,
+        fog: false,
+        depthWrite: false,
+      })
+    );
+    sky.renderOrder = -1;
+    // Keeps the horizon at eye level wherever the car is on the circuit.
+    sky.onBeforeRender = (_r, _s, camera) => sky.position.set(camera.position.x, 0, camera.position.z);
+    return sky;
+  }
+
+  /**
+   * Prefiltered environment for every PBR material in the scene.
+   *
+   * `metalness` is a request to reflect the surroundings, so with no environment
+   * a metal renders from direct lights alone: the barriers came out navy on their
+   * shaded face and tan on the lit one, and the chrome and rims were flat. A raw
+   * cube map is also the wrong input for a roughness-aware BRDF — that needs the
+   * PMREM mip chain. Assigning `scene.environment` reaches every standard and
+   * physical material at once, so nothing has to carry its own `envMap`.
+   */
+  _loadEnvironment() {
+    const cube = new THREE.CubeTextureLoader().load(
+      ['right', 'left', 'top', 'bottom', 'front', 'back']
+        .map(f => `obj/textures/envmap/envmap_${f}.jpg`),
+      loaded => {
+        // The JPEGs only decode after `load` returns, so prefilter on the callback.
+        const pmrem = new THREE.PMREMGenerator(this.renderer);
+        this.scene.environment = pmrem.fromCubemap(loaded).texture;
+        pmrem.dispose();
+      },
+      undefined,
+      err => console.error('Environment map failed to load', err)
+    );
+    // JPEGs are sRGB-encoded; without this they are decoded as linear and the
+    // reflections come back washed out.
+    cube.colorSpace = THREE.SRGBColorSpace;
   }
 
   _setupLights() {
@@ -210,7 +278,7 @@ class HelloRacer {
 
     const car = this.car;
     const pos = car.root.position;
-    const speed = car.cvel.length();
+    const speed = car.speed();
     const facingYaw = car.root.rotation.y;
     const fwdSpeed = car.forwardSpeed();
 
@@ -245,8 +313,11 @@ class HelloRacer {
       pos.z + this._forward.z * lookAhead + this._panOffset.z
     );
 
+    // Directly opposite `headingForwardAt(followYaw)`, which is
+    // (-sin, -cos): the boom is therefore (+sin, +cos). Negating x instead put
+    // the camera off to one side at every heading but 0 and 180 degrees.
     this._camPos.set(
-      pos.x - hDist * Math.sin(this._followYaw) + this._panOffset.x,
+      pos.x + hDist * Math.sin(this._followYaw) + this._panOffset.x,
       pos.y + vDist + 0.45 + this._panOffset.y,
       pos.z + hDist * Math.cos(this._followYaw) + this._panOffset.z
     );
