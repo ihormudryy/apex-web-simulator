@@ -23,7 +23,7 @@ function clamp(v, lo, hi) {
 }
 
 function pacejkaFy(dLat, alpha) {
-  return dLat * Math.sin(PACEJKA_C * Math.atan(PACEJKA_B * alpha));
+  return -dLat * Math.sin(PACEJKA_C * Math.atan(PACEJKA_B * alpha));
 }
 
 function clipFriction(fx, fy, maxF) {
@@ -49,9 +49,9 @@ export function step(state, input, sample, dt) {
   const dLatF = mu * FzF;
   const dLatR = mu * FzR;
 
-  const vxSafe = Math.abs(vx) < 0.1 ? (vx >= 0 ? 0.1 : -0.1) : vx;
-  const alphaF = Math.atan2(vy + av * LF, vxSafe) - steer;
-  const alphaR = Math.atan2(vy - av * LR, vxSafe);
+  const vxMag = Math.max(Math.abs(vx), 0.1);
+  const alphaF = Math.atan2(vy + av * LF, vxMag) - steer;
+  const alphaR = Math.atan2(vy - av * LR, vxMag);
 
   const FyF = pacejkaFy(dLatF, alphaF);
   const FyR = pacejkaFy(dLatR, alphaR);
@@ -70,8 +70,8 @@ export function step(state, input, sample, dt) {
 
   const FxDrag = -Math.sign(vx) * Fd;
 
-  let FxRF = FxEng + FxBrk * 0.4 + FxDrag * 0.4;
-  let FxRR = FxBrk * 0.6 + FxDrag * 0.6;
+  let FxRF = FxBrk * 0.4 + FxDrag * 0.4;
+  let FxRR = FxEng + FxBrk * 0.6 + FxDrag * 0.6;
 
   const clippedF = clipFriction(FxRF, FyF, dLatF);
   FxRF = clippedF.fx;

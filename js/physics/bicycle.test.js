@@ -22,3 +22,28 @@ test('grass μ is lower than tarmac at 40 m/s 2° slip', () => {
     { throttle: 0, brake: false, steer: 0 }, { ...tarmac, surface: 'grass' }, 0.008);
   assert.ok(Math.abs(a.fy) > Math.abs(g.fy) * 2);
 });
+
+test('lateral tire force restores positive sideslip', () => {
+  const dt = 0.01;
+  const s = step({ vx: 40, vy: 1, av: 0, axPrev: 0 },
+    { throttle: 0, brake: false, steer: 0 }, tarmac, dt);
+  assert.ok(s.fy < 0, `fy=${s.fy} should oppose +vy sideslip`);
+  assert.ok(s.vy < 1, `vy grew to ${s.vy}`);
+});
+
+test('straight reverse crawl stays laterally neutral', () => {
+  const dt = 0.01;
+  const s = step({ vx: -1, vy: 0, av: 0, axPrev: 0 },
+    { throttle: -0.25, brake: false, steer: 0 }, tarmac, dt);
+  assert.ok(Math.abs(s.fy) < 100, `fy=${s.fy}`);
+  assert.ok(Math.abs(s.vy) < 0.01, `vy=${s.vy}`);
+});
+
+test('drive force uses rear longitudinal budget', () => {
+  const dt = 0.01;
+  const s = step({ vx: 3, vy: 0, av: 0, axPrev: 0 },
+    { throttle: 1, brake: false, steer: 0 }, tarmac, dt);
+  const fx = (s.vx - 3) / dt * MASS;
+  const frontOnly = 1.6 * MASS * 9.81 * 0.46;
+  assert.ok(fx > frontOnly * 1.02, `fx=${fx} capped at front grip ${frontOnly}`);
+});
