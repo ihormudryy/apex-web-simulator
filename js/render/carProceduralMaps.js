@@ -106,6 +106,29 @@ export function roughnessFromNoise({ size = 256, base = 0.32, variance = 0.08, s
   return { data, size };
 }
 
+export function specularIntensityFromNoise({ size = 256, base = 0.55, variance = 0.12, seed = 16 } = {}) {
+  const data = new Uint8ClampedArray(size * size * 4);
+  const cells = 8;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = (x + 0.5) / size;
+      const v = (y + 0.5) / size;
+      const n = fbm(u, v, cells, seed);
+      const s = clamp(base + (n - 0.5) * 2 * variance, 0.2, 1);
+      const g = Math.round(s * 255);
+      const o = (y * size + x) * 4;
+      // Three samples `specularIntensityMap` from the ALPHA channel only
+      // (`specularIntensityFactor *= texture2D( ... ).a`). Writing the variation
+      // to RGB with alpha pinned at 255 multiplies specular by exactly 1.0
+      // everywhere — the map allocates a texture and changes nothing. RGB keeps
+      // the same value so the map stays inspectable and could feed a
+      // specularColorMap, but alpha is the channel that does the work.
+      data[o] = g; data[o + 1] = g; data[o + 2] = g; data[o + 3] = g;
+    }
+  }
+  return { data, size };
+}
+
 export function metallicFromNoise({ size = 256, base = 0.0, variance = 0.015, seed = 3 } = {}) {
   const data = new Uint8ClampedArray(size * size * 4);
   const cells = 7;

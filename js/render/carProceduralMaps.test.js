@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalFromHeight, roughnessFromNoise, metallicFromNoise,
-  carbonWeaveNormal, tyreMicroNormalAndRoughness,
+  specularIntensityFromNoise, carbonWeaveNormal, tyreMicroNormalAndRoughness,
 } from './carProceduralMaps.js';
 
 test('orange-peel normal encodes a mostly-up normal (high Z)', () => {
@@ -57,3 +57,46 @@ test('tyre maps: normal Z high and roughness mid', () => {
   assert.ok(min > 140 && max < 255, `roughness ${min}..${max}`);
 });
 
+/** Spread of one channel, 0 when the channel carries no variation. */
+function channelSpread(data, offset) {
+  let min = 255, max = 0;
+  for (let i = offset; i < data.length; i += 4) {
+    min = Math.min(min, data[i]);
+    max = Math.max(max, data[i]);
+  }
+  return max - min;
+}
+
+test('specular intensity varies in ALPHA, the only channel three reads', () => {
+  // three: `specularIntensityFactor *= texture2D( specularIntensityMap, uv ).a`.
+  // Writing the variation to RGB and leaving alpha at 255 makes the map inert —
+  // it allocates a texture and multiplies specular by 1.0 everywhere. That
+  // shipped once; this test is why it cannot ship again.
+  const { data } = specularIntensityFromNoise({ size: 64, base: 0.55, variance: 0.1, seed: 16 });
+  assert.ok(channelSpread(data, 3) > 8,
+    `alpha carries no variation (spread ${channelSpread(data, 3)}) — the map is inert`);
+
+  // And it must stay inside a plausible dielectric range once sampled.
+  let min = 255, max = 0;
+  for (let i = 3; i < data.length; i += 4) {
+    min = Math.min(min, data[i]);
+    max = Math.max(max, data[i]);
+  }
+  assert.ok(min / 255 > 0.2 && max / 255 < 1.0,
+    `specular multiplier ${(min / 255).toFixed(2)}..${(max / 255).toFixed(2)} out of range`);
+});
+
+test('greyscale maps fill every channel, so any read channel works', () => {
+  // roughnessMap is read from .g and metalnessMap from .b. These generators are
+  // greyscale, which is what makes them correct regardless — worth pinning, since
+  // the specular map's channel bug was exactly this assumption going unchecked.
+  for (const [name, made] of [
+    ['roughness', roughnessFromNoise({ size: 64 })],
+    ['metallic', metallicFromNoise({ size: 64, variance: 0.05 })],
+  ]) {
+    const r = channelSpread(made.data, 0);
+    assert.ok(r > 0, `${name} has no variation at all`);
+    assert.equal(channelSpread(made.data, 1), r, `${name}: green differs from red`);
+    assert.equal(channelSpread(made.data, 2), r, `${name}: blue differs from red`);
+  }
+});
