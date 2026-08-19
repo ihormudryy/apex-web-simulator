@@ -1,4 +1,4 @@
-// The instrument cluster along the bottom of the screen.
+// The instrument cluster along the top of the screen.
 //
 // A view and nothing more: it takes a telemetry snapshot and draws it. It knows
 // nothing about the car, the physics, or the track — swap the sampler and this
@@ -65,7 +65,7 @@ export class Dashboard {
     );
 
     const hint = el('div', 'dash__hint');
-    hint.textContent = 'H hides';
+    hint.textContent = 'H hides · Esc resets';
     this.root.append(hint);
 
     container.appendChild(this.root);

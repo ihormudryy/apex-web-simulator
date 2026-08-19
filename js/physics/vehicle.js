@@ -48,6 +48,23 @@ export function setPose(v, x, z, yaw) {
   v.spawn = { x, z, yaw };
 }
 
+/** Zero motion and snap back to the spawn pose without counting as a physics reset. */
+export function resetVehicle(v) {
+  v.vx = 0;
+  v.vz = 0;
+  v.av = 0;
+  v.axPrev = 0;
+  v.ayPrev = 0;
+  v.omega = [0, 0, 0, 0];
+  v.steerAngle = 0;
+  v.steerSmooth = 0;
+  v.braking = false;
+  v.wheelSpin = 0;
+  v.x = v.spawn.x;
+  v.z = v.spawn.z;
+  v.yaw = v.spawn.yaw;
+}
+
 export const speed = v => Math.hypot(v.vx, v.vz);
 
 export const forwardSpeed = v =>
@@ -170,8 +187,6 @@ export function applyWallImpulse(v, nx, nz, sign, penetration) {
 }
 
 function resetToSpawn(v) {
-  v.vx = 0; v.vz = 0; v.av = 0; v.axPrev = 0; v.ayPrev = 0;
-  v.omega = [0, 0, 0, 0];
-  v.x = v.spawn.x; v.z = v.spawn.z; v.yaw = v.spawn.yaw;
+  resetVehicle(v);
   v.resets++;
 }

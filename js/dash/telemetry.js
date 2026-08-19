@@ -56,6 +56,22 @@ export function createTelemetry({
     state.lastBucket = -1;
   }
 
+  function reset() {
+    state.lapTime = 0;
+    state.lapCount = 0;
+    state.lastLapTime = null;
+    state.bestLapTime = null;
+    state.prevT = 0;
+    state.sector = 1;
+    state.sectorStart = 0;
+    state.sectorTimes = new Array(sectors).fill(null);
+    state.bestSectorTimes = new Array(sectors).fill(null);
+    state.trace = new Float64Array(deltaBuckets).fill(NaN);
+    state.bestTrace = null;
+    state.lastBucket = -1;
+    state.peakG = 0;
+  }
+
   function finishLap() {
     state.lastLapTime = state.lapTime;
     state.lapCount++;
@@ -188,7 +204,7 @@ export function createTelemetry({
     };
   }
 
-  return { sample, state };
+  return { sample, state, reset };
 }
 
 /** `1:41.234`, or a placeholder when there is no time yet. */

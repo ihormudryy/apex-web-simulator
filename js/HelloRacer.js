@@ -8,6 +8,7 @@ import { nextCameraMode } from './cameraModes.js';
 import { EngineAudio } from './audio/EngineAudio.js';
 import { Dashboard } from './dash/Dashboard.js';
 import { createTelemetry } from './dash/telemetry.js';
+import { setPose } from './physics/vehicle.js';
 import { CSM } from 'three/addons/csm/CSM.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -162,6 +163,7 @@ class HelloRacer {
 
     this.telemetry = createTelemetry({ lapLength: this.track.centerline.length });
     this.dashboard = new Dashboard(container, this.track, { circuitName: 'Silverstone' });
+    this._setupResetControl(container);
 
     this._lastTime = performance.now();
     this._animate();
@@ -333,11 +335,86 @@ class HelloRacer {
     }, { passive: true });
   }
 
+  _zeroVehicle(v) {
+    v.vx = 0;
+    v.vz = 0;
+    v.av = 0;
+    v.axPrev = 0;
+    v.ayPrev = 0;
+    v.omega = [0, 0, 0, 0];
+    v.steerAngle = 0;
+    v.steerSmooth = 0;
+    v.braking = false;
+    v.wheelSpin = 0;
+    v.x = v.spawn.x;
+    v.z = v.spawn.z;
+    v.yaw = v.spawn.yaw;
+  }
+
   _placeCarOnTrack() {
     const s = this.track.spawn();
+    const yaw = Math.atan2(-s.tx, -s.tz);
     this.car.root.position.set(s.x, 0, s.z);
-    this.car.setHeadingFromTangent(s.tx, s.tz);
-    this.car.setSpawn(s.x, s.z, this.car.root.rotation.y);
+    this.car.root.rotation.y = yaw;
+    setPose(this.car.vehicle, s.x, s.z, yaw);
+    this._zeroVehicle(this.car.vehicle);
+  }
+
+  _clearCarForGridReset() {
+    const i = this.car.input;
+    i.forward = false;
+    i.reverse = false;
+    i.left = false;
+    i.right = false;
+    i.brake = false;
+    this.car._braking = false;
+    if (this.car._steerVisual !== undefined) this.car._steerVisual = 0;
+    if (this.car._steerPivot) this.car._steerPivot.rotation.z = 0;
+    for (const w of [this.car.lfw, this.car.rfw, this.car.lrw, this.car.rrw]) {
+      if (!w) continue;
+      w.rotation.y = 0;
+      if (w._spinPivot) w._spinPivot.rotation.z = 0;
+    }
+    if (this.car._tyreTempFront !== undefined) this.car._tyreTempFront = 0;
+    if (this.car._tyreTempRear !== undefined) this.car._tyreTempRear = 0;
+    if (this.car.brakeMat) {
+      this.car.brakeMat.emissive.setHex(0x330000);
+      this.car.brakeMat.emissiveIntensity = 0.4;
+    }
+  }
+
+  _resetRace() {
+    this._clearCarForGridReset();
+    this._placeCarOnTrack();
+    if (this.telemetry?.reset) this.telemetry.reset();
+    this._chaseReady = false;
+    this._followYaw = this.car.root.rotation.y;
+    this._lookSmoothed.copy(this.car.root.position);
+    this._camRoll = 0;
+  }
+
+  _setupResetControl(container) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Reset';
+    btn.title = 'Return to the grid (Esc)';
+    btn.style.cssText = [
+      'position:absolute',
+      'bottom:14px',
+      'right:14px',
+      'z-index:50',
+      'font:600 12px/1 system-ui,sans-serif',
+      'letter-spacing:0.04em',
+      'text-transform:uppercase',
+      'padding:8px 12px',
+      'border:1px solid rgba(150,170,200,0.35)',
+      'border-radius:4px',
+      'background:rgba(8,12,18,0.72)',
+      'color:#e9eff8',
+      'cursor:pointer',
+    ].join(';');
+    btn.addEventListener('click', () => this._resetRace());
+    container.appendChild(btn);
   }
 
   _animate() {
@@ -583,6 +660,11 @@ class HelloRacer {
       this._yaw = 0;
       this._panOffset.set(0, 0, 0);
       this._chaseReady = false;
+      return;
+    }
+    if (e.code === 'Escape') {
+      if (!e.repeat) this._resetRace();
+      e.preventDefault();
       return;
     }
     this._setDriveInput(e, true);
