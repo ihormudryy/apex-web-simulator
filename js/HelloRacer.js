@@ -5,6 +5,8 @@ import { Car } from './Car.js';
 import { MaterialPanel } from './MaterialPanel.js';
 import { createSilverstone } from './track/Silverstone.js';
 import { nextCameraMode } from './cameraModes.js';
+import { Dashboard } from './dash/Dashboard.js';
+import { createTelemetry } from './dash/telemetry.js';
 import {
   directionFromEquirectUV, sunDirectionFromEquirect, horizonColorFromEquirect,
 } from './render/equirect.js';
@@ -32,6 +34,8 @@ class HelloRacer {
 
     this.car = null;
     this.track = null;
+    this.dashboard = null;
+    this.telemetry = null;
     this._camRadius = 7.5;
     this._pitch = 0.32;
     this._yaw = 0;
@@ -113,6 +117,9 @@ class HelloRacer {
     this.car.loadAssets();
     this._placeCarOnTrack();
     new MaterialPanel(this.car.bodyPaintMat);
+
+    this.telemetry = createTelemetry({ lapLength: this.track.centerline.length });
+    this.dashboard = new Dashboard(container, this.track, { circuitName: 'Silverstone' });
 
     this._lastTime = performance.now();
     this._animate();
@@ -286,6 +293,11 @@ class HelloRacer {
 
     this.renderer.render(this.scene, this.camera);
     this.stats.update();
+
+    // After the render, so a slow dashboard frame never holds up the picture.
+    if (this.dashboard.visible) {
+      this.dashboard.update(this.telemetry.sample(this.car, this.track, dt), dt);
+    }
   }
 
   _lerpAngle(a, b, t) {
@@ -442,6 +454,10 @@ class HelloRacer {
   }
 
   _onKeyDown(e) {
+    if (e.code === 'KeyH') {
+      if (!e.repeat) this.dashboard.toggle();
+      return;
+    }
     if (e.code === 'KeyC') {
       if (e.repeat) return;
       this._viewMode = nextCameraMode(this._viewMode);
