@@ -210,7 +210,10 @@ class HelloRacer {
       const hz = horizonColorFromEquirect(img.data, img.width, img.height);
       this.scene.fog.color.setRGB(hz.r / (1 + hz.r), hz.g / (1 + hz.g), hz.b / (1 + hz.b));
     }
-    if (this._csm) this._csm.lightDirection.copy(this._sunDir);
+    // CSM wants the direction the light travels, which is away from the sun.
+    // Handing it `_sunDir` put all four cascade lights below the ground shining
+    // upward, so every upward-facing surface — the whole circuit — went unlit.
+    if (this._csm) this._csm.lightDirection.copy(this._sunDir).negate().normalize();
   }
 
   /**
@@ -247,7 +250,7 @@ class HelloRacer {
       maxFar: FOG_FAR,
       shadowMapSize: 2048,
       shadowBias: -0.00035,
-      lightDirection: this._sunDir.clone(),
+      lightDirection: this._sunDir.clone().negate().normalize(),
       lightIntensity: 3.0,
       lightNear: 0.5,
       lightFar: FOG_FAR + 200,
