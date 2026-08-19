@@ -201,7 +201,8 @@ export class Track extends THREE.Group {
     const height = tileableHeight(size, 3);
     return new THREE.MeshStandardMaterial({
       map: this._asphaltDataTexture(albedoFromHeight(height, size), size, THREE.SRGBColorSpace),
-      normalMap: this._asphaltDataTexture(normalFromHeight(height, size, 6), size, THREE.NoColorSpace),
+      // Normal strength was too high (appeared like rippling mud/water).
+      normalMap: this._asphaltDataTexture(normalFromHeight(height, size, 3), size, THREE.NoColorSpace),
       roughnessMap: this._asphaltDataTexture(roughnessFromHeight(height, size), size, THREE.NoColorSpace),
       color: 0xffffff,
       roughness: 0.72,

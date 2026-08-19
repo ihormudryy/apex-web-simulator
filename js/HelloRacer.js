@@ -7,11 +7,15 @@ import { createSilverstone } from './track/Silverstone.js';
 import { nextCameraMode } from './cameraModes.js';
 import { Dashboard } from './dash/Dashboard.js';
 import { createTelemetry } from './dash/telemetry.js';
+import { CSM } from 'three/addons/csm/CSM.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import {
   directionFromEquirectUV, sunDirectionFromEquirect, horizonColorFromEquirect,
 } from './render/equirect.js';
 import { outdoorSkyData, DEFAULT_SUN_U, DEFAULT_SUN_V } from './render/outdoorSky.js';
-import { localShadowLightPose, applyLocalShadowPose } from './render/localShadow.js';
 
 const SKY_COLOR = 0xa8d6ff;
 const FOG_NEAR = 250;
@@ -55,8 +59,19 @@ class HelloRacer {
     this._forward = new THREE.Vector3();
     this._right = new THREE.Vector3();
     this._sunDir = new THREE.Vector3();
-    this._key = null;
     this._envMap = null;
+    this._csm = null;
+    this._composer = null;
+    this._ssaoPass = null;
+    this._csmMaterialsReady = false;
+    this._csmMaterialSet = new WeakSet();
+    this._csmMaterialScanFrames = 120;
+    this._bounceLight = null;
+    this._fx = {
+      csm: true,
+      ssao: true,
+      bounce: true,
+    };
 
     this._lastTime = 0;
     this._animate = this._animate.bind(this);
@@ -97,6 +112,8 @@ class HelloRacer {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(this.renderer.domElement);
 
+    this._setupCSMAndPost();
+
     this.stats = new Stats();
     this.stats.dom.style.cssText = 'position:absolute;top:0;z-index:100';
     container.appendChild(this.stats.dom);
@@ -114,7 +131,9 @@ class HelloRacer {
     this._loadEnvironment();
 
     this.car = new Car(this.scene);
-    this.car.loadAssets();
+    // Materials that explicitly receive `envMap` need it wired in; otherwise
+    // dielectrics go unnaturally dark (no ambient IBL).
+    this.car.loadAssets(this._envMap);
     this._placeCarOnTrack();
     new MaterialPanel(this.car.bodyPaintMat);
 
@@ -182,7 +201,7 @@ class HelloRacer {
     this._envMap = env;
     this.scene.environment = env;
     this.scene.environmentIntensity = 1.05;
-    this.renderer.toneMappingExposure = 0.9;
+    this.renderer.toneMappingExposure = 1.05;
 
     const img = source.image;
     if (img && img.data && img.width && img.height) {
@@ -191,7 +210,7 @@ class HelloRacer {
       const hz = horizonColorFromEquirect(img.data, img.width, img.height);
       this.scene.fog.color.setRGB(hz.r / (1 + hz.r), hz.g / (1 + hz.g), hz.b / (1 + hz.b));
     }
-    this._updateLocalShadow();
+    if (this._csm) this._csm.lightDirection.copy(this._sunDir);
   }
 
   /**
@@ -204,31 +223,50 @@ class HelloRacer {
     const sun = directionFromEquirectUV(DEFAULT_SUN_U, DEFAULT_SUN_V);
     this._sunDir.set(sun.x, sun.y, sun.z);
 
-    const key = new THREE.DirectionalLight(0xfff1d0, 1.55);
-    key.castShadow = true;
-    key.shadow.mapSize.set(2048, 2048);
-    key.shadow.bias = -0.00035;
-    key.shadow.normalBias = 0.04;
-    this.scene.add(key);
-    this.scene.add(key.target);
-    this._key = key;
-    this._updateLocalShadow();
-
-    const rim = new THREE.DirectionalLight(0xbcd8ff, 0.22);
+    const rim = new THREE.DirectionalLight(0xbcd8ff, 0.35);
     rim.position.set(-35, 30, -55);
     this.scene.add(rim);
+
+    // “GI” approximation: hemisphere bounce from sky (top) to dark asphalt
+    // (bottom). This is fast but sells underside fill much better than pure
+    // hemispherical defaults.
+    this._bounceLight = new THREE.HemisphereLight(
+      new THREE.Color(SKY_COLOR),
+      new THREE.Color(0x4a4a54),
+      0.45,
+    );
+    this.scene.add(this._bounceLight);
   }
 
-  _updateLocalShadow() {
-    if (!this._key) return;
-    const p = this.car ? this.car.root.position : { x: 0, y: 0, z: 0 };
-    applyLocalShadowPose(
-      this._key,
-      localShadowLightPose(p, this._sunDir, {
-        distance: SHADOW_DISTANCE,
-        radius: SHADOW_RADIUS,
-      })
-    );
+  _setupCSMAndPost() {
+    this._csm = new CSM({
+      camera: this.camera,
+      parent: this.scene,
+      cascades: 4,
+      mode: 'practical',
+      maxFar: FOG_FAR,
+      shadowMapSize: 2048,
+      shadowBias: -0.00035,
+      lightDirection: this._sunDir.clone(),
+      lightIntensity: 3.0,
+      lightNear: 0.5,
+      lightFar: FOG_FAR + 200,
+      lightMargin: 80,
+    });
+
+    this._composer = new EffectComposer(this.renderer);
+    const renderPass = new RenderPass(this.scene, this.camera);
+    this._composer.addPass(renderPass);
+
+    this._ssaoPass = new SSAOPass(this.scene, this.camera, 512, 512, 32);
+    // Less aggressive: crushed blacks were dominated by over-darkening.
+    this._ssaoPass.kernelRadius = 5;
+    this._ssaoPass.minDistance = 0.004;
+    this._ssaoPass.maxDistance = 0.06;
+    this._ssaoPass.enabled = this._fx.ssao;
+    this._composer.addPass(this._ssaoPass);
+
+    this._composer.addPass(new OutputPass());
   }
 
   _setupMouseControls() {
@@ -288,10 +326,33 @@ class HelloRacer {
 
     this.car.updateSteering(dt);
     this.car.updatePhysics(dt, this.track);
-    this._updateLocalShadow();
+
+    if (this._csm) {
+      // Car meshes arrive asynchronously (BinLoader). Scan for a short window
+      // and inject CSM defines into any late materials exactly once.
+      if (!this._csmMaterialsReady && this._csmMaterialScanFrames > 0) {
+        this.scene.traverse(obj => {
+          if (!obj.isMesh) return;
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          for (const m of mats) {
+            if (!m) continue;
+            if (this._csmMaterialSet.has(m)) continue;
+            this._csm.setupMaterial(m);
+            this._csmMaterialSet.add(m);
+          }
+        });
+        this._csmMaterialScanFrames--;
+        if (this._csmMaterialScanFrames <= 0) this._csmMaterialsReady = true;
+      }
+      if (this._fx.csm) this._csm.update();
+    }
     this._updateCamera(dt);
 
-    this.renderer.render(this.scene, this.camera);
+    if (this._composer) {
+      this._composer.render(dt);
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
     this.stats.update();
 
     // After the render, so a slow dashboard frame never holds up the picture.
@@ -423,6 +484,7 @@ class HelloRacer {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    if (this._composer) this._composer.setSize(window.innerWidth, window.innerHeight);
   }
 
   _setDriveInput(e, down) {
@@ -456,6 +518,24 @@ class HelloRacer {
   _onKeyDown(e) {
     if (e.code === 'KeyH') {
       if (!e.repeat) this.dashboard.toggle();
+      return;
+    }
+    if (e.code === 'Digit1') {
+      if (this._ssaoPass && !e.repeat) {
+        this._fx.ssao = !this._fx.ssao;
+        this._ssaoPass.enabled = this._fx.ssao;
+      }
+      return;
+    }
+    if (e.code === 'Digit2') {
+      if (this._bounceLight && !e.repeat) {
+        this._fx.bounce = !this._fx.bounce;
+        this._bounceLight.visible = this._fx.bounce;
+      }
+      return;
+    }
+    if (e.code === 'Digit3') {
+      if (!e.repeat) this._fx.csm = !this._fx.csm;
       return;
     }
     if (e.code === 'KeyC') {
