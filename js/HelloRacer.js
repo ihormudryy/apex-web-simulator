@@ -113,6 +113,36 @@ class HelloRacer {
       // cost (pre-pass + lit pass + GTAO + SSGI + TRAA); WebGL uses GTAOPass.
       ssao: false,
       bounce: true,
+      /**
+       * Temporal AA. **Default off, because it measured worse.** Toggle with `T`.
+       *
+       * The case for it is strong on paper and the plan calls it the largest
+       * image-quality win available: this scene is almost entirely thin geometry —
+       * kerb stripes, 0.14 m dashes, barrier rails, catch-fence wire, wing
+       * elements, 34 000 grass cutouts — and MSAA resolves edge coverage without
+       * touching a dash two hundred metres away that is a third of a pixel wide.
+       *
+       * And by the rendering dashboard's metrics it worked spectacularly:
+       * sub-pixel instability 3.80 -> 1.60, worst-case edge crawl 46 -> 19,
+       * unresolved detail 9.1% -> 2.4%. Every target green, including the two the
+       * plan recorded as stuck.
+       *
+       * All of which was mostly blur. Instability measures how much the frame
+       * changes when the sampling grid moves half a pixel, and a blurred frame
+       * barely changes either — so the metric rewards blur and cannot tell the two
+       * apart. Measured against a 3x supersampled reference, which can be gamed by
+       * neither, it is 143% further from the truth than MSAA alone
+       * (`npm run validate:aa`).
+       *
+       * The pass itself is structurally right — reprojection verified working at
+       * 1.9 px of displacement while moving and 0.06 px parked — and the
+       * accumulation is stable. What it does not do is converge: a jittered frame
+       * starts ~0.35 px from the truth and the history recovers almost none of
+       * that back. Finishing it needs Catmull-Rom history sampling and probably a
+       * variance-based clip instead of min/max, and that is a bounded piece of
+       * work rather than a mystery. It is left off until it earns its place.
+       */
+      taa: false,
     };
 
     this._lastTime = 0;
@@ -344,6 +374,8 @@ class HelloRacer {
     const { RenderPass } = await import('three/addons/postprocessing/RenderPass.js');
     const { GTAOPass } = await import('three/addons/postprocessing/GTAOPass.js');
     const { OutputPass } = await import('three/addons/postprocessing/OutputPass.js');
+    const { Pass, FullScreenQuad } = await import('three/addons/postprocessing/Pass.js');
+    const { createTaaPass } = await import('./render/taaPass.js');
 
     this._csm = new CSM({
       camera: this.camera,
@@ -368,16 +400,21 @@ class HelloRacer {
     }
 
     // Composer render targets have no MSAA unless asked. The canvas
-    // `antialias: true` only applies to renderer.render(), so SSAO stays on
-    // its own path and the default frame keeps hardware AA.
+    // `antialias: true` only applies to renderer.render(), so a composer frame
+    // has to ask for `samples` itself or it is worse than the plain path.
+    //
+    // A depth texture is attached because TAA needs it: reprojecting last frame's
+    // pixel means unprojecting this frame's depth to a world point and projecting
+    // it through the previous view-projection. Without depth there is no
+    // reprojection and TAA degenerates to a blur.
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
-    this._composer = new EffectComposer(
-      this.renderer,
-      new THREE.WebGLRenderTarget(size.x, size.y, {
-        type: THREE.HalfFloatType,
-        samples: 4,
-      }),
-    );
+    const sceneTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+      samples: 4,
+    });
+    sceneTarget.depthTexture = new THREE.DepthTexture(size.x, size.y);
+    sceneTarget.depthTexture.type = THREE.UnsignedIntType;
+    this._composer = new EffectComposer(this.renderer, sceneTarget);
     this._composer.setSize(window.innerWidth, window.innerHeight);
     this._composer.addPass(new RenderPass(this.scene, this.camera));
 
@@ -395,6 +432,14 @@ class HelloRacer {
     this._aoPass.updatePdMaterial({ samples: 8, rings: 2, radius: 8 });
     this._aoPass.enabled = this._fx.ssao;
     this._composer.addPass(this._aoPass);
+
+    // TAA before OutputPass, so the accumulation happens in linear HDR. Averaging
+    // tone-mapped sRGB values is a different and wrong average.
+    this._taaPass = createTaaPass(Pass, FullScreenQuad, {
+      width: size.x, height: size.y,
+    });
+    this._taaPass.enabled = this._fx.taa;
+    this._composer.addPass(this._taaPass);
 
     this._composer.addPass(new OutputPass());
   }
@@ -597,10 +642,16 @@ class HelloRacer {
     this._updateCamera(dt);
     this.track.updateTracksideLOD(this.camera);
 
+    // The jitter has to be in the projection matrix before geometry is drawn, and
+    // a Pass only gets control afterwards — so it is applied here rather than
+    // inside the pass. Run on every path, because the measurement offset has to
+    // work with TAA off as well as on.
+    this._applyJitter();
+
     if (this._fx.ssao && this._webgpuPost?.renderPipeline) {
       this._setWebGpuAoEnabled(true);
       this._webgpuPost.renderPipeline.render();
-    } else if (this._fx.ssao && this._composer) {
+    } else if (this._composer && (this._fx.ssao || this._fx.taa)) {
       this._composer.render(dt);
     } else {
       this.renderer.render(this.scene, this.camera);
@@ -610,6 +661,15 @@ class HelloRacer {
     const snap = this.telemetry.sample(this.car, this.track, dt);
     this.engineAudio.update(snap);
     if (this.dashboard.visible) this.dashboard.update(snap, dt);
+  }
+
+  _applyJitter() {
+    if (!this._taaPass) return;
+    this._taaPass.enabled = this._fx.taa;
+    const size = this.renderer.getDrawingBufferSize(this._drawSize ??= new THREE.Vector2());
+    this._taaPass.jitter(this.camera, size.x, size.y);
+    this.camera.updateMatrixWorld();
+    this._taaPass.captureCamera(this.camera);
   }
 
   _lerpAngle(a, b, t) {
@@ -757,6 +817,10 @@ class HelloRacer {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     if (this._composer) this._composer.setSize(window.innerWidth, window.innerHeight);
+    if (this._taaPass) {
+      const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+      this._taaPass.setSize(size.x, size.y);
+    }
     if (this._webgpuCsm) this._webgpuCsm.updateFrustums();
   }
 
@@ -791,6 +855,14 @@ class HelloRacer {
   _onKeyDown(e) {
     if (e.code === 'KeyH') {
       if (!e.repeat) this.dashboard.toggle();
+      return;
+    }
+    if (e.code === 'KeyT') {
+      if (!e.repeat) {
+        this._fx.taa = !this._fx.taa;
+        if (this._taaPass) this._taaPass.enabled = this._fx.taa;
+        if (!this._fx.taa) this.camera.clearViewOffset();
+      }
       return;
     }
     if (e.code === 'Digit1') {

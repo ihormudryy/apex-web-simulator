@@ -116,6 +116,8 @@ function analyse(a, b) {
   const mean = arr => arr.reduce((s, v) => s + v, 0) / arr.length;
   const q = (arr, p) => { const s = [...arr].sort((x, y) => x - y); return s[Math.floor(p * s.length)]; };
   return {
+    width: w,
+    height: h,
     instability: mean(diffs),
     instabilityP99: q(diffs, 0.99),
     edgeFraction: (100 * edges) / n,
@@ -201,19 +203,60 @@ async function main() {
     })()`);
     await new Promise(r => setTimeout(r, 600));
 
-    const a = await shoot(cdp);
+    /**
+     * Capture a jittered pair with temporal AA in a given state.
+     *
+     * The measurement offset goes through the TAA pass rather than straight onto
+     * the camera. TAA jitters through the same `setViewOffset`, so setting the
+     * camera directly was simply overwritten on the next frame — and the metric
+     * then read near zero whatever the image looked like, which is a false pass
+     * obtained by breaking the instrument.
+     *
+     * A full second of settling after each change, because a TAA history needs
+     * more than a dozen frames to converge and half a converged history is a
+     * meaningless thing to measure.
+     */
+    const capturePair = async taa => {
+      await evaluate(cdp, `(() => {
+        window.racer._fx.taa = ${taa};
+        if (window.racer._taaPass) {
+          window.racer._taaPass.enabled = ${taa};
+          window.racer._taaPass.measureOffset = { x: 0, y: 0 };
+          window.racer._taaPass.reset();
+        } else {
+          window.racer.camera.clearViewOffset();
+        }
+        return 1;
+      })()`);
+      await new Promise(r => setTimeout(r, 1000));
+      const first = await shoot(cdp);
+      await evaluate(cdp, `(() => {
+        if (window.racer._taaPass) {
+          window.racer._taaPass.measureOffset = { x: 0.5, y: 0.5 };
+        } else {
+          const c = window.racer.camera;
+          c.setViewOffset(innerWidth, innerHeight, 0.5, 0.5, innerWidth, innerHeight);
+          c.updateProjectionMatrix();
+        }
+        return 1;
+      })()`);
+      await new Promise(r => setTimeout(r, 1000));
+      const second = await shoot(cdp);
+      return analyse(first, second);
+    };
+
+    // Measured both ways on purpose. Sub-pixel instability describes how aliased
+    // the raw image is, so the honest headline is the unresolved number — and the
+    // resolved one next to it is what the player actually sees.
+    const raw = await capturePair(false);
+    const m = await capturePair(true);
+    const a = { width: m.width, height: m.height };
     await evaluate(cdp, `(() => {
-      const c = window.racer.camera;
-      c.setViewOffset(innerWidth, innerHeight, 0.5, 0.5, innerWidth, innerHeight);
-      c.updateProjectionMatrix();
+      if (window.racer._taaPass) window.racer._taaPass.measureOffset = { x: 0, y: 0 };
+      window.racer.camera.clearViewOffset();
       return 1;
     })()`);
-    await new Promise(r => setTimeout(r, 600));
-    const b = await shoot(cdp);
-    await evaluate(cdp, `(() => { window.racer.camera.clearViewOffset(); return 1; })()`);
     cdp.close();
-
-    const m = analyse(a, b);
 
     console.log(`\n  Rendering quality — ${a.width}x${a.height} on ${gpu}`);
     console.log(`  ${C.dim}grass wind stopped on ${stilled} material(s) before capture${C.end}`);
@@ -235,6 +278,11 @@ async function main() {
       );
     }
     console.log(`\n  ${passes}/${TARGETS.length} within target`);
+    console.log(
+      `\n  ${C.dim}temporal AA: sub-pixel instability ${raw.instability.toFixed(2)}`
+      + ` unresolved -> ${m.instability.toFixed(2)} resolved`
+      + `   (edge crawl p99 ${raw.instabilityP99.toFixed(1)} -> ${m.instabilityP99.toFixed(1)})`
+      + `   (unresolved detail ${raw.edgeFraction.toFixed(2)}% -> ${m.edgeFraction.toFixed(2)}%)${C.end}`);
     const labels = ['horizon', 'far track', 'mid track', 'near track', 'foreground'];
     console.log(`\n  ${C.dim}where the instability is (mean diff by band, top to bottom)${C.end}`);
     const worst = Math.max(...m.bands);
