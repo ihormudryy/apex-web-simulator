@@ -119,6 +119,8 @@ export class Track extends THREE.Group {
     this._wheelHint = 0;
     this._propHint = 0;
     this._profile = profile;
+    this._tyreMarkTexture = null;
+    this._asphaltUniforms = [];
 
     this._build();
   }
@@ -451,6 +453,20 @@ export class Track extends THREE.Group {
    * The WebGL path only — `tslSurfaceNodes.createAsphaltNodeMaterial` builds the
    * same effect as a node graph for WebGPU, from the same map and ranges.
    */
+  /**
+   * Hand the asphalt the dynamic tyre-mark texture.
+   *
+   * Kept as a setter rather than a constructor argument: the marks belong to the
+   * car's effect set and the car is built after the track, and inverting that so
+   * the track owns them would put a rendering buffer inside the circuit.
+   */
+  setTyreMarkTexture(texture) {
+    this._tyreMarkTexture = texture;
+    for (const uniforms of this._asphaltUniforms) {
+      uniforms.uTyreMarks.value = texture;
+    }
+  }
+
   _applyAsphaltSurfaceVariation(material, texture, range) {
     const albedoMin = range.albedoMin.toFixed(5);
     const albedoSpan = range.albedoSpan.toFixed(5);
@@ -459,6 +475,12 @@ export class Track extends THREE.Group {
 
     const inject = shader => {
       shader.uniforms.uAsphaltSurface = { value: texture };
+      // Dynamic rubber, laid down by the car. The baked racing line in
+      // `uAsphaltSurface` is where a *session* of cars has been; this is where
+      // *this* car has been, and it deepens as the driver uses the same line.
+      shader.uniforms.uTyreMarks = { value: this._tyreMarkTexture ?? null };
+      shader.uniforms.uHasTyreMarks = { value: this._tyreMarkTexture ? 1 : 0 };
+      this._asphaltUniforms.push(shader.uniforms);
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', `#include <common>
         attribute vec2 aSurfaceUv;
@@ -468,6 +490,8 @@ export class Track extends THREE.Group {
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>
         uniform sampler2D uAsphaltSurface;
+        uniform sampler2D uTyreMarks;
+        uniform float uHasTyreMarks;
         varying vec2 vSurfaceUv;`)
         .replace('#include <map_fragment>', `#include <map_fragment>
         vec4 surf = texture2D( uAsphaltSurface, vSurfaceUv );
@@ -477,12 +501,17 @@ export class Track extends THREE.Group {
         // desaturation toward the albedo's own luminance, which was a no-op here:
         // asphalt albedo is already near-neutral. The TSL path had the same term
         // and it was actively wrong there — see tslSurfaceNodes.js.
-        diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 0.93, 0.97, 1.05 ), surf.b );`)
+        diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 0.93, 0.97, 1.05 ), surf.b );
+        // Laid rubber: darker, cooler and smoother than the aggregate under it,
+        // which is the same direction the baked line goes and for the same reason.
+        float marks = uHasTyreMarks * texture2D( uTyreMarks, vSurfaceUv ).r;
+        diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 0.34, 0.35, 0.38 ), marks );`)
         // `surf` is still in scope here: both chunks expand inside main(), and
         // roughnessmap_fragment follows map_fragment. Re-fetching the same texel
         // cost a second dependent read per fragment across the whole track.
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-        roughnessFactor *= ${roughMin} + surf.g * ${roughSpan};`);
+        roughnessFactor *= ${roughMin} + surf.g * ${roughSpan};
+        roughnessFactor *= mix( 1.0, 0.72, marks );`);
     };
 
     // CSM assigns its own onBeforeCompile to every standard material in the

@@ -332,7 +332,22 @@ export function telemetryOf(v) {
     gradeLong: out.gradeLong,
     gradeLat: out.gradeLat,
     roughness: out.roughness,
-    heave: v.car.suspension.zc,
+    /**
+     * World height of the chassis reference point.
+     *
+     * `zc` is the chassis position relative to the suspension's ground datum, and
+     * because the suspension is fed raw wheel heights it tracks the *whole*
+     * elevation change since the car was placed — at Village that is nearly 4 m.
+     * So `groundHeight + zc` double-counts the hill, and the car ends up four
+     * metres under the road with the camera inside the ground looking at grey.
+     */
+    chassisY: v.car.datum + v.car.suspension.zc,
+    /**
+     * The suspension's own vertical motion, with the terrain taken out. This is
+     * squat and dive — millimetres — and it is what a camera or a ride-height
+     * readout wants. `zc` on its own is metres of hillside.
+     */
+    heave: v.car.suspension.zc - (out.groundHeight - v.car.datum),
     pitch: v.car.suspension.pitch,
     roll: v.car.suspension.roll,
     fz: out.fz,

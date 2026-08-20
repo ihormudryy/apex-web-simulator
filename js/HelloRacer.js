@@ -5,6 +5,9 @@ import { Car } from './Car.js';
 import { MaterialPanel } from './MaterialPanel.js';
 import { createSilverstone } from './track/Silverstone.js';
 import { nextCameraMode, DRIVER_CAMERA, CAMERA_NEAR } from './cameraModes.js';
+import {
+  createChassisCamera, updateChassisCamera, speedFov,
+} from './render/chassisCamera.js';
 import { Dashboard } from './dash/Dashboard.js';
 import { createTelemetry } from './dash/telemetry.js';
 import {
@@ -105,6 +108,7 @@ class HelloRacer {
     this._csmMaterialSet = new WeakSet();
     this._csmMaterialScanFrames = 120;
     this._bounceLight = null;
+    this._headCam = createChassisCamera();
     this.engineAudio = new EngineAudio();
     this._fx = {
       csm: true,
@@ -603,6 +607,12 @@ class HelloRacer {
 
     this.car.updateSteering(dt);
     this.car.updatePhysics(dt, this.track);
+    // The car's effect set is built on its first physics frame, so the handover of
+    // the tyre-mark texture to the asphalt happens here rather than at setup.
+    if (!this._marksConnected && this.car.tyreMarkTexture) {
+      this.track.setTyreMarkTexture(this.car.tyreMarkTexture);
+      this._marksConnected = true;
+    }
 
     if (this._skybox) {
       this._skybox.position.set(
@@ -699,22 +709,50 @@ class HelloRacer {
     }
   }
 
-  _updateOnboardCamera(alongFwd, height, lookAhead, lookY, fov, near = CAMERA_NEAR) {
+  /**
+   * Onboard camera, moved by the chassis rather than bolted to it.
+   *
+   * The plan puts most of the *perceived* speed and grip in this rather than in
+   * the image, and it is right in a way that is easy to underrate: a camera that
+   * leans under braking, shakes over a kerb and settles as the car takes a set
+   * tells you what the car is doing continuously, without a number. Nothing here
+   * is keyed to an input — a camera that lurches when the brake key goes down
+   * rather than when the car decelerates lies about a locked wheel.
+   */
+  _updateOnboardCamera(alongFwd, height, lookAhead, lookY, fov, near = CAMERA_NEAR, dt = 0) {
     const car = this.car;
     const pos = car.root.position;
     car.headingForward(this._forward);
+    const sim = car.simState();
+    const head = updateChassisCamera(this._headCam, {
+      aLong: sim.aLong,
+      aLat: sim.aLat,
+      pitch: sim.pitch + sim.gradeLong,
+      roll: sim.roll + sim.gradeLat,
+      heave: sim.heave,
+      roughness: sim.roughness,
+      speed: car.speed(),
+    }, dt);
+
+    // The head offset is in body axes; forward is the car's heading and right is
+    // perpendicular to it.
+    const rx = -this._forward.z;
+    const rz = this._forward.x;
     this.camera.position.set(
-      pos.x + this._forward.x * alongFwd,
-      pos.y + height,
-      pos.z + this._forward.z * alongFwd
+      pos.x + this._forward.x * (alongFwd + head.x) + rx * head.z,
+      pos.y + height + head.y,
+      pos.z + this._forward.z * (alongFwd + head.x) + rz * head.z
     );
+    // Aim through the head's pitch, so leaning under braking actually changes
+    // where the driver is looking rather than only where their eyes are.
     this._camTarget.set(
-      pos.x + this._forward.x * lookAhead,
-      pos.y + lookY,
-      pos.z + this._forward.z * lookAhead
+      pos.x + this._forward.x * lookAhead + rx * head.z,
+      pos.y + lookY + head.y - head.pitch * lookAhead,
+      pos.z + this._forward.z * lookAhead + rz * head.z
     );
     this.camera.lookAt(this._camTarget);
-    this._setCameraLens(fov, near);
+    this.camera.rotateZ(head.roll);
+    this._setCameraLens(speedFov(fov, car.speed()), near);
     this._camRoll = 0;
     this._chaseReady = false;
   }
@@ -722,11 +760,12 @@ class HelloRacer {
   _updateCamera(dt) {
     if (this._viewMode === 'driver') {
       const c = DRIVER_CAMERA;
-      this._updateOnboardCamera(c.alongFwd, c.height, c.lookAhead, c.lookY, c.fov, c.near);
+      this._updateOnboardCamera(
+        c.alongFwd, c.height, c.lookAhead, c.lookY, c.fov, c.near, dt);
       return;
     }
     if (this._viewMode === 'front') {
-      this._updateOnboardCamera(2.55, 0.42, 22, 0.32, 52);
+      this._updateOnboardCamera(2.55, 0.42, 22, 0.32, 52, CAMERA_NEAR, dt);
       return;
     }
 

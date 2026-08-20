@@ -10,8 +10,12 @@ import {
 } from './render/carProceduralMaps.js';
 import { MASS, G, WB, LR, LF } from './physics/constants.js';
 import { cockpitSteerAngle, followSteerAngle } from './render/cockpitSteer.js';
+import {
+  createCarEffects, updateCarEffects, updateBrakeGlow,
+} from './render/carEffects.js';
 
 const DEG90 = Math.PI / 2;
+const clampUnit = v => Math.max(-1, Math.min(1, v));
 /** Surface temperatures the tyre shading is authored between, °C. */
 const T_TYRE_COLD = 60;
 const T_TYRE_HOT = 130;
@@ -58,6 +62,23 @@ export class Car {
     this._tyreTempRear = 0;
 
     this.input = { forward: false, reverse: false, left: false, right: false, brake: false };
+
+    // Physics-driven effects. Created lazily on the first physics frame, because
+    // they need the scene and the scene is the constructor's argument — but the
+    // wheel world positions they emit from are only known once the car has moved.
+    this._scene = scene;
+    this._fx = null;
+    this._fxState = {
+      sim: null,
+      wheels: [
+        { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 },
+        { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 },
+      ],
+      wheelTrack: [{ t: 0, across: 0 }, { t: 0, across: 0 },
+        { t: 0, across: 0 }, { t: 0, across: 0 }],
+      exhaust: { x: 0, y: 0, z: 0 },
+      x: 0, z: 0, groundY: 0, forwardX: 0, forwardZ: 0, speed: 0, throttle: 0,
+    };
   }
 
   // Physics state, read by the camera. The car mesh faces -Z at yaw 0.
@@ -398,6 +419,73 @@ export class Car {
     this.root.add(shadow);
   }
 
+  /**
+   * Emit and advance the physics-driven effects.
+   *
+   * Wheel positions come from the kernel's own surface samples, which are already
+   * the world positions it queried the track at — so the smoke leaves the contact
+   * patch the tyre model was actually using rather than a place the renderer
+   * guessed at.
+   */
+  _updateEffects(v, sim, pose, track, dt) {
+    const st = this._fxState;
+    const samples = v.car.surfaces;
+    for (let i = 0; i < 4; i++) {
+      const s = samples[i];
+      st.wheels[i].x = s.x;
+      st.wheels[i].y = s.height;
+      st.wheels[i].z = s.z;
+      // Track-space position per wheel, so four wheels lay four lines. The car is
+      // 1.6 m wide on a 12 m surface, and a racing line is exactly the difference
+      // between one mark and four.
+      if (track?.query) {
+        const q = track.query(s.x, s.z);
+        st.wheelTrack[i].t = q.t;
+        // Normalised to the ASPHALT half-width, because that is what the
+        // asphalt's own `aSurfaceUv.y` spans — v = 1 at lateral = +halfWidth.
+        // Dividing by the full width instead put every mark in the middle half of
+        // the texture and none of it where the shader looks.
+        st.wheelTrack[i].across = q.halfWidth > 0
+          ? clampUnit(q.lateral / q.halfWidth)
+          : 0;
+      }
+    }
+    const sinY = Math.sin(pose.yaw);
+    const cosY = Math.cos(pose.yaw);
+    st.sim = sim;
+    st.x = pose.x;
+    st.z = pose.z;
+    st.groundY = sim.groundHeight;
+    st.forwardX = -sinY;
+    st.forwardZ = -cosY;
+    st.speed = speed(v);
+    st.throttle = Math.max(0, v.pedals.throttle);
+    // Behind the gearbox, on the centreline.
+    st.exhaust.x = pose.x + sinY * 2.2;
+    st.exhaust.y = sim.groundHeight + 0.42;
+    st.exhaust.z = pose.z + cosY * 2.2;
+    updateCarEffects(this._fx, st, dt);
+  }
+
+  /**
+   * Everything the camera and the effects read, from the kernel.
+   *
+   * `aLong` and `aLat` are the body-frame accelerations the load transfer already
+   * uses, not a difference of rendered positions — a camera driven by a numerical
+   * derivative of an interpolated pose jitters at the interpolation frequency.
+   */
+  simState() {
+    const t = telemetryOf(this.vehicle);
+    t.aLong = this.vehicle.axPrev;
+    t.aLat = this.vehicle.ayPrev;
+    return t;
+  }
+
+  /** The dynamic tyre-mark texture, once the effect set exists. */
+  get tyreMarkTexture() {
+    return this._fx?.marks?.texture ?? null;
+  }
+
   updateSteering(dt) {
     updateSteering(this.vehicle, this.input, dt);
   }
@@ -407,23 +495,25 @@ export class Car {
     this._track = track;
     advance(v, this.input, track, dt);
 
+    if (!this._fx) this._fx = createCarEffects(this._scene);
     // Interpolated, not raw: the sim runs at a fixed 600 Hz and the display does
     // not, so drawing the latest state directly shows a step pattern of 10, 10,
     // 11 states per frame that reads as micro-stutter.
+    const sim = telemetryOf(v);
     const pose = renderPose(v, this._pose);
     // Y follows the surface, and the body takes the road's attitude plus its own.
     // The car used to sit on a plane at y = 0 whatever the track did.
-    const sim = telemetryOf(v);
-    this.root.position.set(pose.x, sim.groundHeight + sim.heave, pose.z);
+    this.root.position.set(pose.x, sim.chassisY, pose.z);
     this.root.rotation.y = pose.yaw;
     this.visualRoot.rotation.x = -(sim.gradeLong + sim.pitch);
     this.visualRoot.rotation.z = sim.gradeLat + sim.roll;
 
-    if (this.brakeMat && v.braking !== this._braking) {
-      this._braking = v.braking;
-      this.brakeMat.emissive.setHex(v.braking ? 0xff1100 : 0x330000);
-      this.brakeMat.emissiveIntensity = v.braking ? 1.5 : 0.4;
-    }
+    // Brake glow from disc temperature, which is the same number that sets pad
+    // friction. The old version lit the discs from a boolean, so they glowed
+    // instantly from cold and went out instantly when the pedal came up — neither
+    // of which a 5 kg carbon disc can do.
+    this._braking = v.braking;
+    updateBrakeGlow(this._fx, this.brakeMat, sim.brakeT, v.braking);
 
     this.lfw.rotation.y = v.steerAngle;
     this.rfw.rotation.y = v.steerAngle;
@@ -434,6 +524,8 @@ export class Car {
       w._spinPivot.rotation.z -= v.wheelSpin;
     }
 
+    this._updateEffects(v, sim, pose, track, dt);
+
     // Tyre micro “life”: heat and wear roughness, and a squash from the real
     // corner load. Both used to be modelled here separately from the physics —
     // the load re-derived from a lumped ClA and a longitudinal transfer term, and
@@ -441,7 +533,6 @@ export class Car {
     // this reads them instead of inventing them.
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     if (this._tyreMatFront && this._tyreMatRear) {
-      const sim = telemetryOf(v);
       const baseFzF = MASS * G * LR / WB;
       const baseFzR = MASS * G * LF / WB;
       const FzF = sim.fz[0] + sim.fz[1];
