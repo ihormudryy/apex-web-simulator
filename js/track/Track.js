@@ -19,6 +19,7 @@ import {
   surfaceHeight, surfaceRoughness, verticalCurvature,
   groundFieldHeight, meanElevation, KERB_WIDTH,
 } from './elevation.js';
+import { armcoAlbedo, armcoNormal, armcoRoughness, PANEL_METRES } from '../render/barrierMaps.js';
 import { MU } from '../physics/constants.js';
 
 const DEG90 = Math.PI / 2;
@@ -233,12 +234,20 @@ export class Track extends THREE.Group {
       metalness: 0.04,
     }), 'kerb');
     const edgeMaterial = layered(this._lineWearMaterial(), 'marking');
-    // Galvanised Armco. Needs `scene.environment` to have anything to reflect —
-    // bare metalness with only direct lights renders navy on the shaded side.
+    // Galvanised Armco, from the procedural maps in barrierMaps.js: W-beam
+    // corrugation in the normal map, spangle and weathering in the albedo,
+    // burnished crests in the roughness. One texture tile per panel, tiled along
+    // the wall by the UVs the barrier geometry now carries. Still needs
+    // `scene.environment` to have anything to reflect — bare metalness with only
+    // direct lights renders navy on the shaded side.
     const barrierMaterial = new THREE.MeshStandardMaterial({
-      color: 0xb8bcc0,
-      roughness: 0.45,
-      metalness: 0.35,
+      map: this._barrierDataTexture(armcoAlbedo(512, 128), 512, 128, THREE.SRGBColorSpace),
+      normalMap: this._barrierDataTexture(armcoNormal(512, 128), 512, 128, THREE.NoColorSpace),
+      normalScale: new THREE.Vector2(1, 1),
+      roughnessMap: this._barrierDataTexture(armcoRoughness(512, 128), 512, 128, THREE.NoColorSpace),
+      color: 0xffffff,
+      roughness: 1,
+      metalness: 0.55,
       // Face winding flips with the side the run is on, so don't cull.
       side: THREE.DoubleSide,
     });
@@ -364,6 +373,24 @@ export class Track extends THREE.Group {
       metalness: 0,
     });
     return mat;
+  }
+
+  /**
+   * A wall texture: repeats along the rail (u), clamps up it (v), and carries a
+   * full mip chain — the wall is seen down a kilometre of straight, which is the
+   * exact geometry that made the unmipped asphalt shimmer.
+   */
+  _barrierDataTexture(data, width, height, colorSpace) {
+    const texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = true;
+    texture.anisotropy = 8;
+    texture.colorSpace = colorSpace;
+    texture.needsUpdate = true;
+    return texture;
   }
 
   _markingDataTexture(data, width, height, colorSpace) {
@@ -748,8 +775,16 @@ export class Track extends THREE.Group {
 
     const vertices = new Float32Array(rings * faces.length * 2 * 3);
     const normals = new Float32Array(rings * faces.length * 2 * 3);
+    // UVs: u runs along the wall in panel lengths, v up the rail — so the Armco
+    // maps tile one panel per PANEL_METRES and the corrugation lies horizontal,
+    // the way a real W-beam does.
+    const uvs = new Float32Array(rings * faces.length * 2 * 2);
     const indices = new Uint32Array(n * faces.length * 6);
     let vi = 0;
+    let ti = 0;
+    let along = 0;
+    let prevCx = null;
+    let prevCz = null;
 
     const lap = this.centerline.length;
     for (let i = 0; i < rings; i++) {
@@ -757,6 +792,12 @@ export class Track extends THREE.Group {
       const wallLimit = s.halfWidth + s.runoff;
       const cx = s.x + s.nx * side * wallLimit;
       const cz = s.z + s.nz * side * wallLimit;
+      // Accumulated distance along the wall itself, not the centreline — the wall
+      // is offset, so its corners are longer or shorter than the lap's.
+      if (prevCx !== null) along += Math.hypot(cx - prevCx, cz - prevCz);
+      prevCx = cx;
+      prevCz = cz;
+      const u = along / PANEL_METRES;
       // "Inward" is back toward the centerline, whichever side this run is on.
       const inX = -side * s.nx, inZ = -side * s.nz;
       // Barriers stand on the ground, and the ground now moves. Left at a fixed
@@ -780,7 +821,12 @@ export class Track extends THREE.Group {
             normals[vi] = inX * sign;
             normals[vi + 2] = inZ * sign;
           }
+          uvs[ti] = u;
+          // Side faces map v to height up the rail; the narrow cap reads the very
+          // top of the texture, which the profile rolls away to nothing.
+          uvs[ti + 1] = face.normal === 'up' ? 0.99 : y / height;
           vi += 3;
+          ti += 2;
         }
       }
     }
@@ -801,8 +847,10 @@ export class Track extends THREE.Group {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeBoundingSphere();
+    if (material.normalMap) geometry.computeTangents();
     const mesh = new THREE.Mesh(geometry, material);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
