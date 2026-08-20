@@ -11,6 +11,7 @@
     "assets": "bash download.sh",
     "validate": "node scripts/validate-physics.mjs",
     "validate:visual": "node scripts/validate-visual.mjs",
-    "validate:aa": "node scripts/validate-aa.mjs"
+    "validate:aa": "node scripts/validate-aa.mjs",
+    "validate:drive": "node scripts/validate-drive.mjs"
   }
 }
