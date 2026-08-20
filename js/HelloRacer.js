@@ -5,11 +5,12 @@ import { Car } from './Car.js';
 import { createSilverstone } from './track/Silverstone.js';
 import { RenderPanel } from './render/RenderPanel.js';
 import { defaultRenderValues } from './render/renderPanelState.js';
-import { nextCameraMode, DRIVER_CAMERA, CAMERA_NEAR } from './cameraModes.js';
+import { nextCameraMode, DRIVER_CAMERA, CAMERA_NEAR, adjustChaseZoom, CHASE_ZOOM } from './cameraModes.js';
 import {
   createChassisCamera, updateChassisCamera, speedFov,
 } from './render/chassisCamera.js';
 import { Dashboard } from './dash/Dashboard.js';
+import { ControlHints } from './dash/ControlHints.js';
 import { createTelemetry } from './dash/telemetry.js';
 import { SetupPanel } from './dash/setupPanel.js';
 import {
@@ -85,6 +86,7 @@ class HelloRacer {
     this.car = null;
     this.track = null;
     this.dashboard = null;
+    this.controlHints = null;
     this.telemetry = null;
     this._camRadius = CHASE_DISTANCE;
     this._pitch = CHASE_PITCH;
@@ -281,6 +283,7 @@ class HelloRacer {
 
     this.telemetry = createTelemetry({ lapLength: this.track.centerline.length });
     this.dashboard = new Dashboard(container, this.track, { circuitName: 'Silverstone' });
+    this.controlHints = new ControlHints(container);
 
     // Setup screen. Applying one rebuilds the car, because half of a setup lives in
     // derived state — roll stiffness, corner loads, the suspension's own rates —
@@ -732,8 +735,18 @@ class HelloRacer {
 
     el.addEventListener('wheel', e => {
       if (this._viewMode !== 'chase') return;
-      this._camRadius = THREE.MathUtils.clamp(this._camRadius + e.deltaY * 0.01, 2, 30);
+      this._camRadius = adjustChaseZoom(this._camRadius, e.deltaY * 0.01);
     }, { passive: true });
+  }
+
+  _adjustChaseZoom(delta) {
+    if (this._viewMode !== 'chase') return;
+    this._camRadius = adjustChaseZoom(this._camRadius, delta);
+  }
+
+  _toggleHud() {
+    this.dashboard.toggle();
+    this.controlHints.setVisible(this.dashboard.visible);
   }
 
   /**
@@ -767,7 +780,7 @@ class HelloRacer {
     for (const w of [this.car.lfw, this.car.rfw, this.car.lrw, this.car.rrw]) {
       if (!w) continue;
       w.rotation.y = 0;
-      if (w._spinPivot) w._spinPivot.rotation.z = 0;
+      if (w._spinPivot) w._spinPivot.rotation.x = 0;
     }
     this.car._tyreTempFront = 0;
     this.car._tyreTempRear = 0;
@@ -1057,7 +1070,9 @@ class HelloRacer {
       return;
     }
     if (this._viewMode === 'front') {
-      this._updateOnboardCamera(2.55, 0.42, 22, 0.32, 52, CAMERA_NEAR, dt);
+      // Just ahead of the nose tip, which sits 2.95 m forward of the pose now
+      // that the body carries MESH_FORWARD_OFFSET.
+      this._updateOnboardCamera(2.99, 0.42, 22, 0.32, 52, CAMERA_NEAR, dt);
       return;
     }
 
@@ -1185,7 +1200,7 @@ class HelloRacer {
 
   _onKeyDown(e) {
     if (e.code === 'KeyH') {
-      if (!e.repeat) this.dashboard.toggle();
+      if (!e.repeat) this._toggleHud();
       return;
     }
     // `P` for the setup panel: `S` is the brake, and stealing a driving key for a
@@ -1221,6 +1236,18 @@ class HelloRacer {
       this._panOffset.set(0, 0, 0);
       this._chaseReady = false;
       return;
+    }
+    if (this._viewMode === 'chase' && !e.repeat) {
+      if (e.code === 'Equal' || e.code === 'NumpadAdd') {
+        this._adjustChaseZoom(-CHASE_ZOOM.step);
+        e.preventDefault();
+        return;
+      }
+      if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
+        this._adjustChaseZoom(CHASE_ZOOM.step);
+        e.preventDefault();
+        return;
+      }
     }
     if (e.code === 'Escape') {
       if (!e.repeat) this._resetRace();

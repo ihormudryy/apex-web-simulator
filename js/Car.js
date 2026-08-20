@@ -18,6 +18,10 @@ import {
   NO_MESH_DAMAGE,
 } from './render/meshDamage.js';
 import { enableCarParticleSystems } from './render/carParticleBackend.js';
+import {
+  hubBaseY, chassisAttitudeRotation, wheelRootPosition, suspensionHubOffset,
+  MESH_FORWARD_OFFSET,
+} from './render/wheelVisual.js';
 
 const DEG90 = Math.PI / 2;
 const clampUnit = v => Math.max(-1, Math.min(1, v));
@@ -42,6 +46,10 @@ export class Car {
 
     this.body = new THREE.Object3D();
     this.body.rotation.y = DEG90;
+    // The mesh origin is not the CoG: shifted so the authored wheel hubs land
+    // on the physics axles at ±LF/LR (see MESH_FORWARD_OFFSET). visualRoot's
+    // +X is forward.
+    this.body.position.x = MESH_FORWARD_OFFSET;
     this.visualRoot.add(this.body);
 
     // Only the rim lives here. DriverBody is one unrigged mesh (suit + legs +
@@ -51,10 +59,10 @@ export class Car {
     this.body.add(this._steerPivot);
     this._steerVisual = 0;
 
-    this.lfw = this._makeWheel( 1.3928, 0.34, -0.69);
-    this.rfw = this._makeWheel( 1.4,    0.34,  0.69);
-    this.lrw = this._makeWheel(-2,      0.34, -0.69);
-    this.rrw = this._makeWheel(-2,      0.34,  0.69);
+    this.lfw = this._makeWheel(0, 0, 0);
+    this.rfw = this._makeWheel(0, 0, 0);
+    this.lrw = this._makeWheel(0, 0, 0);
+    this.rrw = this._makeWheel(0, 0, 0);
 
     this.vehicle = createVehicle();
     this._braking = false;
@@ -135,7 +143,7 @@ export class Car {
     this.lfw.rotation.y = 0;
     this.rfw.rotation.y = 0;
     for (const w of [this.lfw, this.rfw, this.lrw, this.rrw]) {
-      w._spinPivot.rotation.z = 0;
+      w._spinPivot.rotation.x = 0;
     }
     this._tyreTempFront = 0;
     this._tyreTempRear = 0;
@@ -157,7 +165,7 @@ export class Car {
     w.position.set(x, y, z);
     w._spinPivot = new THREE.Object3D();
     w.add(w._spinPivot);
-    this.visualRoot.add(w);
+    this.root.add(w);
     return w;
   }
 
@@ -378,8 +386,14 @@ export class Car {
       });
     }
 
-    const rotLeft  = new THREE.Matrix4().makeRotationY(-DEG90);
-    const rotRight = new THREE.Matrix4().makeRotationY( DEG90);
+    // Wheels are root children, where the car's lateral axis is ±X — and the
+    // wheel meshes are authored with the axle already along X (+X face
+    // inboard). Left wheels use the geometry as authored; right wheels flip
+    // 180° so the rim's outer face points outboard. The old ∓90° came from
+    // the 2011 demo, whose car frame had +X forward — copied into this frame
+    // it pointed every axle fore-aft and stood the tyres perpendicular.
+    const rotLeft  = new THREE.Matrix4();
+    const rotRight = new THREE.Matrix4().makeRotationY(Math.PI);
 
     for (const [name, mat] of Object.entries(wheelParts)) {
       BinLoader.load(`obj/js/${name}.bin`, geo => {
@@ -447,9 +461,10 @@ export class Car {
         polygonOffsetUnits: -6,
       })
     );
-    // Child of root, so +X is the car's right and -Z is forward.
+    // Child of root, so +X is the car's right and -Z is forward. The blob was
+    // baked around the bodywork, so it follows the body's forward shift.
     shadow.rotation.x = -DEG90;
-    shadow.position.set(0.08, 0.026, 0.35);
+    shadow.position.set(0.08, 0.026, 0.35 - MESH_FORWARD_OFFSET);
     shadow.renderOrder = 1;
     shadow.castShadow = false;
     shadow.receiveShadow = false;
@@ -486,17 +501,21 @@ export class Car {
     }
 
     // Wheel camber collapse. Steering owns rotation.y and the spin pivot owns
-    // its own axis, so the camber lands on rotation.x — the wheels hang off
-    // visualRoot, where +x is the car's forward and z is lateral, making x the
-    // camber axis. "Outward" is the sign of the wheel's own z.
+    // the axle, so the camber lands on rotation.z — the wheels hang off root,
+    // where z is fore-aft and the lean axis is fore-aft. "Outward" is away
+    // from the centreline, i.e. the sign of the wheel's own lateral x (a
+    // positive z-rotation tips the top toward -x).
     const wheels = [this.lfw, this.rfw, this.lrw, this.rrw];
     for (let i = 0; i < 4; i++) {
       const w = wheels[i];
       if (!w) continue;
-      if (w.userData.baseY === undefined) w.userData.baseY = w.position.y;
       const { camber, lift } = wheelCollapse(dmg.wheels[i]);
-      w.rotation.x = camber * Math.sign(w.position.z || 1);
-      w.position.y = w.userData.baseY + lift;
+      const hubY = this.vehicle?.car?.surfaces
+        ? wheelRootPosition(i, this.vehicle.car.surfaces[i], telemetryOf(this.vehicle).chassisY).y
+          + suspensionHubOffset(this.vehicle.car.suspension, i)
+        : hubBaseY(i);
+      w.rotation.z = -camber * Math.sign(w.position.x || 1);
+      w.position.y = hubY + lift;
     }
 
     // Paint wear, as multipliers on the pristine values so a reset restores
@@ -594,6 +613,7 @@ export class Car {
     visual.rotation.y = DEG90;
     const body = new THREE.Object3D();
     body.rotation.y = DEG90;
+    body.position.x = MESH_FORWARD_OFFSET;
     body.add(mesh);
     visual.add(body);
     root.add(visual);
@@ -678,13 +698,22 @@ export class Car {
      * frame while the car moved at 0.064. That is the "bouncing front to rear like
      * a cobblestone road" — a smooth car, drawn badly.
      *
-     * Roll had the opposite bug: `suspension.roll` is positive with the right side
-     * down and `gradeLat` is dh/dy with y positive right, so the two are equal and
-     * opposite and adding them CANCELLED the bank. The car was drawn level through
-     * a banked corner.
+     * The axis mapping lives in chassisAttitudeRotation: visualRoot's Euler is
+     * gimbal-locked by its constant 90° yaw, so x and z both rotate about the
+     * lateral axis (positive = nose up) and roll cannot be drawn on this node.
      */
-    this.visualRoot.rotation.x = -sim.pitch;
-    this.visualRoot.rotation.z = -sim.roll;
+    const att = chassisAttitudeRotation(sim.pitch, sim.roll);
+    this.visualRoot.rotation.x = att.x;
+    this.visualRoot.rotation.z = att.z;
+
+    const susp = v.car.suspension;
+    const wheels = [this.lfw, this.rfw, this.lrw, this.rrw];
+    for (let i = 0; i < 4; i++) {
+      const w = wheels[i];
+      if (!w) continue;
+      const p = wheelRootPosition(i, v.car.surfaces[i], sim.chassisY);
+      w.position.set(p.x, p.y + suspensionHubOffset(susp, i), p.z);
+    }
 
     // Brake glow from disc temperature, which is the same number that sets pad
     // friction. The old version lit the discs from a boolean, so they glowed
@@ -698,8 +727,9 @@ export class Car {
     this._steerVisual = followSteerAngle(
       this._steerVisual, cockpitSteerAngle(v.steerSmooth), dt);
     this._steerPivot.rotation.z = this._steerVisual;
+    // The axle runs along the wheel's local X, so rolling is a rotation about it.
     for (const w of [this.lfw, this.rfw, this.lrw, this.rrw]) {
-      w._spinPivot.rotation.z -= v.wheelSpin;
+      w._spinPivot.rotation.x -= v.wheelSpin;
     }
 
     this._updateEffects(v, sim, pose, track, dt);

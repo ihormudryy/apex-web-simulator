@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CAMERA_MODES, DRIVER_CAMERA, nextCameraMode } from './cameraModes.js';
+import { CAMERA_MODES, DRIVER_CAMERA, nextCameraMode, clampChaseZoom, adjustChaseZoom, CHASE_ZOOM } from './cameraModes.js';
 
 test('C cycles rear chase → driver → front bumper → rear', () => {
   assert.deepEqual(CAMERA_MODES, ['chase', 'driver', 'front']);
@@ -9,8 +9,9 @@ test('C cycles rear chase → driver → front bumper → rear', () => {
   assert.equal(nextCameraMode('front'), 'chase');
 });
 
-// Steering hub after the car's two +90° Y wraps: 0.505 m forward, 0.593 m up.
-const WHEEL = { alongFwd: 0.5054, height: 0.5933 };
+// Steering hub after the car's two +90° Y wraps and the body's forward shift:
+// 0.5054 + MESH_FORWARD_OFFSET (0.4375) m forward, 0.593 m up.
+const WHEEL = { alongFwd: 0.9429, height: 0.5933 };
 
 function pitch(fromFwd, fromY, toFwd, toY) {
   return Math.atan2(toY - fromY, toFwd - fromFwd);
@@ -26,4 +27,11 @@ test('driver camera keeps the steering wheel inside the vertical FOV', () => {
   assert.ok(c.near <= 0.06, 'cockpit surfaces sit well inside a 0.25 m clip plane');
   assert.ok(WHEEL.alongFwd - c.alongFwd > c.near,
     'wheel must sit in front of the near clip plane');
+});
+
+test('chase zoom clamps and steps', () => {
+  assert.equal(clampChaseZoom(1), CHASE_ZOOM.min);
+  assert.equal(clampChaseZoom(40), CHASE_ZOOM.max);
+  assert.equal(adjustChaseZoom(5, -CHASE_ZOOM.step), 5 - CHASE_ZOOM.step);
+  assert.equal(adjustChaseZoom(2, -1), CHASE_ZOOM.min);
 });
