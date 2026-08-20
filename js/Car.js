@@ -1,18 +1,20 @@
 import * as THREE from 'three';
 import { BinLoader } from './BinLoader.js';
 import {
-  createVehicle, setPose, advance, updateSteering,
+  createVehicle, setPose, advance, updateSteering, renderPose,
   speed, forwardSpeed, lateralSpeed, travelYaw,
 } from './physics/vehicle.js';
 import {
-  normalFromHeight, roughnessFromNoise, metallicFromNoise,
+  normalFromHeight, roughnessFromNoise, metallicFromNoise, specularIntensityFromNoise,
   carbonWeaveNormal, tyreMicroNormalAndRoughness,
 } from './render/carProceduralMaps.js';
 import {
   MASS, G, WB, LR, LF, RHO, CLA, H_CG,
 } from './physics/bicycle.js';
+import { cockpitSteerAngle, followSteerAngle } from './render/cockpitSteer.js';
 
 const DEG90 = Math.PI / 2;
+const STEER_HUB = { x: 0, y: 0.5933, z: 0.5054 };
 
 export class Car {
   constructor(scene) {
@@ -27,6 +29,13 @@ export class Car {
     this.body.rotation.y = DEG90;
     this.visualRoot.add(this.body);
 
+    // Only the rim lives here. DriverBody is one unrigged mesh (suit + legs +
+    // gloves); parenting it to the hub swung the whole driver onto the nose.
+    this._steerPivot = new THREE.Object3D();
+    this._steerPivot.position.set(STEER_HUB.x, STEER_HUB.y, STEER_HUB.z);
+    this.body.add(this._steerPivot);
+    this._steerVisual = 0;
+
     this.lfw = this._makeWheel( 1.3928, 0.34, -0.69);
     this.rfw = this._makeWheel( 1.4,    0.34,  0.69);
     this.lrw = this._makeWheel(-2,      0.34, -0.69);
@@ -34,6 +43,9 @@ export class Car {
 
     this.vehicle = createVehicle();
     this._braking = false;
+    // Reused every frame: the render pose is interpolated between the last two
+    // sim states, and the inner loop is not allowed to allocate.
+    this._pose = { x: 0, z: 0, yaw: 0 };
 
     this.brakeMat     = null;
     this.bodyPaintMat = null;
@@ -68,6 +80,46 @@ export class Car {
 
   setSpawn(x, z, yaw) {
     setPose(this.vehicle, x, z, yaw);
+  }
+
+  /** Grid reset: spawn pose, zero speed, clear pedals and steering visuals. */
+  resetRace(x, z, yaw) {
+    this.input.forward = false;
+    this.input.reverse = false;
+    this.input.left = false;
+    this.input.right = false;
+    this.input.brake = false;
+    setPose(this.vehicle, x, z, yaw);
+    const v = this.vehicle;
+    v.vx = 0;
+    v.vz = 0;
+    v.av = 0;
+    v.axPrev = 0;
+    v.ayPrev = 0;
+    v.omega = [0, 0, 0, 0];
+    v.steerAngle = 0;
+    v.steerSmooth = 0;
+    v.braking = false;
+    v.wheelSpin = 0;
+    v.x = x;
+    v.z = z;
+    v.yaw = yaw;
+    this.root.position.set(x, this.root.position.y, z);
+    this.root.rotation.y = yaw;
+    this._braking = false;
+    this._steerVisual = 0;
+    this._steerPivot.rotation.z = 0;
+    this.lfw.rotation.y = 0;
+    this.rfw.rotation.y = 0;
+    for (const w of [this.lfw, this.rfw, this.lrw, this.rrw]) {
+      w._spinPivot.rotation.z = 0;
+    }
+    this._tyreTempFront = 0;
+    this._tyreTempRear = 0;
+    if (this.brakeMat) {
+      this.brakeMat.emissive.setHex(0x330000);
+      this.brakeMat.emissiveIntensity = 0.4;
+    }
   }
 
   _makeWheel(x, y, z) {
@@ -136,24 +188,30 @@ export class Car {
       THREE.NoColorSpace,
       { wrap: true, repeat: [2, 2] }
     );
+    const bodySpecTex = makeDataTex(
+      () => specularIntensityFromNoise({ size: 512, base: 0.55, variance: 0.1, seed: 16 }),
+      THREE.NoColorSpace,
+      { wrap: true, repeat: [2, 2] }
+    );
 
     this.bodyPaintMat = new THREE.MeshPhysicalMaterial({
       map: tex('obj/textures/BodyPaint.jpg'),
-      envMap, envMapIntensity: 1.0,
-      roughness: 0.28, roughnessMap: bodyRoughTex,
-      metalness: 0.02, metalnessMap: bodyMetalTex,
+      envMap, envMapIntensity: 0.55,
+      roughness: 0.42, roughnessMap: bodyRoughTex,
+      metalness: 0.0, metalnessMap: bodyMetalTex,
       normalMap: bodyNormalTex,
-      normalScale: new THREE.Vector2(1.0, 1.0),
+      normalScale: new THREE.Vector2(0.45, 0.45),
+      specularIntensity: 0.55,
+      specularIntensityMap: bodySpecTex,
 
-      clearcoat: 0.9,
-      clearcoatRoughness: 0.04,
+      clearcoat: 0.4,
+      clearcoatRoughness: 0.14,
       clearcoatRoughnessMap: clearcoatRoughTex,
       clearcoatNormalMap: clearcoatNormalTex,
-      clearcoatNormalScale: new THREE.Vector2(0.7, 0.7),
+      clearcoatNormalScale: new THREE.Vector2(0.25, 0.25),
 
-      anisotropy: 0.25,
-      // Keep clearcoat breakup readable, but avoid “dark mirror” look.
-      reflectivity: 0.65,
+      anisotropy: 0.08,
+      reflectivity: 0.45,
     });
     this.brakeMat = new THREE.MeshStandardMaterial({
       color: 0x800000, map: tex('obj/textures/RearLights.jpg'),
@@ -170,18 +228,18 @@ export class Car {
     const carbonMat = new THREE.MeshPhysicalMaterial({
       color: 0x111111,
       envMap,
-      envMapIntensity: 0.6,
-      roughness: 0.26,
+      envMapIntensity: 0.35,
+      roughness: 0.38,
       metalness: 0.0,
       normalMap: carbonNormalTex,
-      normalScale: new THREE.Vector2(1.1, 1.1),
+      normalScale: new THREE.Vector2(0.7, 0.7),
 
-      clearcoat: 0.2,
-      clearcoatRoughness: 0.06,
+      clearcoat: 0.12,
+      clearcoatRoughness: 0.18,
       clearcoatNormalMap: carbonNormalTex,
-      clearcoatNormalScale: new THREE.Vector2(0.6, 0.6),
-      anisotropy: 0.4,
-      reflectivity: 0.6,
+      clearcoatNormalScale: new THREE.Vector2(0.3, 0.3),
+      anisotropy: 0.2,
+      reflectivity: 0.35,
     });
 
     // Tyre micro-detail: grooves + grain. Sidewall heat/wear is applied at
@@ -221,56 +279,22 @@ export class Car {
 
     const tyreBaseColor = new THREE.Color(0xffffff);
     const makeTyreMat = (baseRoughness) => {
-      const m = new THREE.MeshPhysicalMaterial({
+      const m = new THREE.MeshStandardMaterial({
         map: tex('obj/textures/Tyre.jpg'),
         envMap,
-        envMapIntensity: 0.08,
+        envMapIntensity: 0.04,
         roughness: baseRoughness,
         roughnessMap: tyreRoughTex,
         metalness: 0.0,
         normalMap: tyreNormalTex,
-        normalScale: new THREE.Vector2(0.7, 0.7),
-        clearcoat: 0.0,
-        anisotropy: 0.05,
-        reflectivity: 0.06,
-        ior: 1.45,
+        normalScale: new THREE.Vector2(0.25, 0.25),
       });
       m.userData.baseRoughness = baseRoughness;
       m.userData.baseColor = tyreBaseColor.clone();
       return m;
     };
-    this._tyreMatFront = makeTyreMat(0.88);
-    this._tyreMatRear = makeTyreMat(0.90);
-
-    // Fix potential decal UV ranges so textures don't stretch due to
-    // non-normalized UV extents.
-    const normalizeUVAttribute = (geometry) => {
-      const uvAttr = geometry.attributes?.uv;
-      if (!uvAttr) return;
-      const arr = uvAttr.array;
-      if (!arr || arr.length < 2) return;
-      let umin = Infinity, umax = -Infinity, vmin = Infinity, vmax = -Infinity;
-      for (let i = 0; i < arr.length; i += 2) {
-        umin = Math.min(umin, arr[i]);
-        umax = Math.max(umax, arr[i]);
-        vmin = Math.min(vmin, arr[i + 1]);
-        vmax = Math.max(vmax, arr[i + 1]);
-      }
-      // Most of the model assets already provide UVs in the 0..1 range.
-      // If we re-normalize everything aggressively, decals like the engine
-      // barcode can get stretched by re-scaling a sub-rectangle.
-      const needsNormalization =
-        (umin < -0.02) || (umax > 1.02) || (vmin < -0.02) || (vmax > 1.02);
-      if (!needsNormalization) return;
-      const du = umax - umin;
-      const dv = vmax - vmin;
-      if (du < 1e-6 || dv < 1e-6) return;
-      for (let i = 0; i < arr.length; i += 2) {
-        arr[i] = (arr[i] - umin) / du;
-        arr[i + 1] = (arr[i + 1] - vmin) / dv;
-      }
-      uvAttr.needsUpdate = true;
-    };
+    this._tyreMatFront = makeTyreMat(0.94);
+    this._tyreMatRear = makeTyreMat(0.96);
 
     const bodyParts = {
       BodyPaint:     { x:0,       y:0.5859,  z:0,       mat: this.bodyPaintMat },
@@ -282,7 +306,7 @@ export class Car {
       Windshield:    { x:0,       y:0.6777,  z:0.5647,  mat: new THREE.MeshPhysicalMaterial({ color:0xaaccff, envMap, envMapIntensity:0.7, roughness:0.05, metalness:0.1, transparent:true, opacity:0.35, side:THREE.DoubleSide }) },
       RearLight:     { x:0,       y:0.4652,  z:-2.34,   mat: this.brakeMat },
       RearLightGlass:{ x:0,       y:0.4652,  z:-2.34,   mat: new THREE.MeshPhysicalMaterial({ color:0xff2200, envMap, envMapIntensity:0.4, roughness:0.05, metalness:0.1, transparent:true, opacity:0.7, side:THREE.DoubleSide }) },
-      SteeringWheel: { x:0,       y:0.5933,  z:0.5054,  mat: new THREE.MeshStandardMaterial({ map:tex('obj/textures/SteeringWheel.jpg'), envMap, roughness:0.45, metalness:0.1 }) },
+      SteeringWheel: { x:0, y:0, z:0, mat: new THREE.MeshStandardMaterial({ map:tex('obj/textures/SteeringWheel.jpg'), envMap, roughness:0.45, metalness:0.1 }), parent: this._steerPivot },
       DriverBody:    { x:-0.0113, y:0.4063,  z:0.5277,  mat: new THREE.MeshStandardMaterial({ map:tex('obj/textures/Driver.jpg'), envMap, roughness:0.7, metalness:0 }) },
       Helmet:        { x:0.0016,  y:0.7287,  z:-0.0175, mat: new THREE.MeshStandardMaterial({ map:tex('obj/textures/Helmet.jpg'), envMap, envMapIntensity:0.4, roughness:0.2, metalness:0.3 }) },
       Visor:         { x:0.0016,  y:0.6993,  z:0.052,   mat: new THREE.MeshPhysicalMaterial({ map:tex('obj/textures/Visor.jpg'),  envMap, envMapIntensity:0.7, roughness:0.05, metalness:0.1, transparent:true, opacity:0.8, side:THREE.DoubleSide }) },
@@ -290,18 +314,17 @@ export class Car {
 
     const wheelParts = {
       Tyre:      null, // handled with front/rear mats stored on this._tyreMatFront/_tyreMatRear
-      Rim:       new THREE.MeshStandardMaterial({ map:tex('obj/textures/Rim.jpg'), envMap, envMapIntensity:0.25, roughness:0.45, metalness:0.65 }),
+      Rim:       new THREE.MeshStandardMaterial({ map:tex('obj/textures/Rim.jpg'), envMap, envMapIntensity:0.2, roughness:0.55, metalness:0.55 }),
       WheelBase: blackMat,
     };
 
     for (const [name, p] of Object.entries(bodyParts)) {
       BinLoader.load(`obj/js/${name}.bin`, geo => {
-        if (p.mat?.map) normalizeUVAttribute(geo);
         const mesh = new THREE.Mesh(geo, p.mat);
         mesh.position.set(p.x, p.y, p.z);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
-        this.body.add(mesh);
+        (p.parent || this.body).add(mesh);
       });
     }
 
@@ -347,8 +370,9 @@ export class Car {
    * grey wash with a hard rectangular edge. `toneMapped: false` keeps the
    * surround neutral so only the baked blob darkens anything.
    *
-   * Sits at y = 0.03 to clear the painted lines at 0.018–0.025 m; below them the
-   * lines are opaque and z-occlude the shadow instead of being darkened by it.
+   * Must sit above the painted lines (0.012–0.020 m) and below the kerb
+   * (0.030 m). Coplanar with either, or with depthTest off / DoubleSide, the
+   * white JPEG canvas z-fights as bright rectangles under the chassis.
    */
   _addContactShadow(loader) {
     const map = loader.load('obj/textures/Shadow.jpg');
@@ -359,24 +383,26 @@ export class Car {
       new THREE.PlaneGeometry(7.2, 7.2),
       new THREE.MeshBasicMaterial({
         map,
-        side: THREE.DoubleSide,
+        side: THREE.FrontSide,
         transparent: true,
         depthWrite: false,
-        depthTest: false,
+        depthTest: true,
         blending: THREE.MultiplyBlending,
         // The only blend path three offers for MultiplyBlending; without it the
         // renderer logs "MultiplyBlending requires material.premultipliedAlpha".
         premultipliedAlpha: true,
         toneMapped: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -6,
+        polygonOffsetUnits: -6,
       })
     );
     // Child of root, so +X is the car's right and -Z is forward.
     shadow.rotation.x = -DEG90;
-    // Slightly lower so the blob actually sits in contact with the asphalt
-    // even with post-processing and CSM shader variations.
-    shadow.position.set(0.08, 0.02, 0.35);
+    shadow.position.set(0.08, 0.026, 0.35);
     shadow.renderOrder = 1;
-    shadow.frustumCulled = false;
+    shadow.castShadow = false;
+    shadow.receiveShadow = false;
     this.root.add(shadow);
   }
 
@@ -388,8 +414,12 @@ export class Car {
     const v = this.vehicle;
     advance(v, this.input, track, dt);
 
-    this.root.position.set(v.x, this.root.position.y, v.z);
-    this.root.rotation.y = v.yaw;
+    // Interpolated, not raw: the sim runs at a fixed 600 Hz and the display does
+    // not, so drawing the latest state directly shows a step pattern of 10, 10,
+    // 11 states per frame that reads as micro-stutter.
+    const pose = renderPose(v, this._pose);
+    this.root.position.set(pose.x, this.root.position.y, pose.z);
+    this.root.rotation.y = pose.yaw;
 
     if (this.brakeMat && v.braking !== this._braking) {
       this._braking = v.braking;
@@ -399,6 +429,9 @@ export class Car {
 
     this.lfw.rotation.y = v.steerAngle;
     this.rfw.rotation.y = v.steerAngle;
+    this._steerVisual = followSteerAngle(
+      this._steerVisual, cockpitSteerAngle(v.steerSmooth), dt);
+    this._steerPivot.rotation.z = this._steerVisual;
     for (const w of [this.lfw, this.rfw, this.lrw, this.rrw]) {
       w._spinPivot.rotation.z -= v.wheelSpin;
     }
@@ -445,7 +478,7 @@ export class Car {
 
       const updateTyreMat = (mat, temp) => {
         const base = mat.userData.baseRoughness ?? mat.roughness;
-        mat.roughness = clamp(base + temp * 0.14, 0.25, 0.95);
+        mat.roughness = clamp(base + temp * 0.04, 0.85, 0.98);
         const baseColor = mat.userData.baseColor ?? new THREE.Color(0xffffff);
         const tint = 1 - temp * 0.06;
         mat.color.copy(baseColor).multiplyScalar(tint);

@@ -8,6 +8,7 @@
 // `forward = (-sin yaw, -cos yaw)` and `right = (cos yaw, -sin yaw)`.
 
 import { step } from './bicycle.js';
+import { createClock, resetClock, pump, DT, lerp } from './fixedStep.js';
 
 /** Below this forward speed, "reverse" means reverse rather than brake. */
 export const REVERSE_THRESHOLD = 0.5;
@@ -16,12 +17,6 @@ export const REVERSE_THROTTLE = -0.25;
 export const WHEEL_RADIUS = 0.334;
 const MAX_STEER_DEG = 18;
 const STEER_RATE = 2.5;
-/** Substep target rate. The tyre model needs a short step to stay convergent, so
- *  the count follows the frame time instead of being fixed at 4 — a 20 fps frame
- *  would otherwise integrate three times coarser than a 60 fps one. */
-const SUBSTEP_HZ = 240;
-const MAX_SUBSTEPS = 16;
-const MAX_FRAME_DT = 0.05;
 
 const DEG2RAD = Math.PI / 180;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -40,11 +35,20 @@ export function createVehicle({ x = 0, z = 0, yaw = 0 } = {}) {
     wheelSpin: 0,
     spawn: { x, z, yaw },
     resets: 0,
+    // The sim clock, kept per-vehicle so a replay harness can drive several cars
+    // independently without them sharing an accumulator.
+    clock: createClock(),
+    // Pose one sim step back, for render interpolation. The renderer must never
+    // read `x`/`z`/`yaw` directly or it re-introduces the stutter the fixed step
+    // exists to remove.
+    prev: { x, z, yaw },
+    pedals: { throttle: 0, brake: false },
   };
 }
 
 export function setPose(v, x, z, yaw) {
   v.x = x; v.z = z; v.yaw = yaw;
+  v.prev.x = x; v.prev.z = z; v.prev.yaw = yaw;
   v.spawn = { x, z, yaw };
 }
 
@@ -63,6 +67,10 @@ export function resetVehicle(v) {
   v.x = v.spawn.x;
   v.z = v.spawn.z;
   v.yaw = v.spawn.yaw;
+  v.prev.x = v.spawn.x;
+  v.prev.z = v.spawn.z;
+  v.prev.yaw = v.spawn.yaw;
+  resetClock(v.clock);
 }
 
 export const speed = v => Math.hypot(v.vx, v.vz);
@@ -109,70 +117,103 @@ export function resolvePedals(v, input) {
   };
 }
 
+/**
+ * Advance one rendered frame's worth of sim time.
+ *
+ * The frame time never reaches the integrator. It goes into an accumulator, and
+ * whole `DT` steps come out — see fixedStep.js for why that is worth the extra
+ * indirection. `renderPose` is what the scene graph should read.
+ */
 export function advance(v, input, track, dt) {
-  const frame = Math.min(dt, MAX_FRAME_DT);
-  if (frame <= 0) { v.wheelSpin = 0; return; }
-
-  const n = clamp(Math.ceil(frame * SUBSTEP_HZ), 4, MAX_SUBSTEPS);
-  const h = frame / n;
   const { brake, throttle } = resolvePedals(v, input);
   // Brake lights follow brake or reverse, so they stay lit through the handover
   // from "reverse key is braking" to "reverse key is reversing".
   v.braking = brake || throttle < 0;
+  v.pedals.throttle = throttle;
+  v.pedals.brake = brake;
   v.wheelSpin = 0;
 
+  pump(
+    v.clock, dt,
+    () => simStep(v, throttle, brake, track),
+    () => snapshotPose(v),
+  );
+}
+
+function snapshotPose(v) {
+  v.prev.x = v.x;
+  v.prev.z = v.z;
+  v.prev.yaw = v.yaw;
+}
+
+/**
+ * Pose to draw: the two most recent sim states blended by the leftover fraction
+ * of a step. Without this, a 60 Hz display sampling a 600 Hz sim shows a step
+ * pattern of 10, 10, 11, 10 states per frame, which reads as micro-stutter even
+ * though the physics is perfectly smooth.
+ *
+ * Yaw is blended linearly rather than by shortest arc on purpose: it accumulates
+ * without wrapping, and one step of yaw is at most a few milliradians.
+ */
+export function renderPose(v, out = { x: 0, z: 0, yaw: 0 }) {
+  const t = v.clock.alpha;
+  out.x = lerp(v.prev.x, v.x, t);
+  out.z = lerp(v.prev.z, v.z, t);
+  out.yaw = lerp(v.prev.yaw, v.yaw, t);
+  return out;
+}
+
+/** One fixed `DT` step of the vehicle. Called only from the accumulator. */
+function simStep(v, throttle, brake, track) {
+  const h = DT;
   let sample = track.query(v.x, v.z);
 
-  for (let i = 0; i < n; i++) {
-    const sinY = Math.sin(v.yaw), cosY = Math.cos(v.yaw);
-    const fwd = v.vx * -sinY + v.vz * -cosY;
-    const lat = v.vx * cosY + v.vz * -sinY;
+  const sinY = Math.sin(v.yaw), cosY = Math.cos(v.yaw);
+  const fwd = v.vx * -sinY + v.vz * -cosY;
+  const lat = v.vx * cosY + v.vz * -sinY;
 
-    const result = step(
-      {
-        vx: fwd, vy: lat, av: v.av,
-        axPrev: v.axPrev, ayPrev: v.ayPrev,
-      },
-      { throttle, brake, steer: v.steerAngle },
-      sample,
-      h,
-    );
+  const result = step(
+    {
+      vx: fwd, vy: lat, av: v.av,
+      axPrev: v.axPrev, ayPrev: v.ayPrev,
+    },
+    { throttle, brake, steer: v.steerAngle },
+    sample,
+    h,
+  );
 
-    const accFwd = (result.vx - fwd) / h;
-    const accLat = (result.vy - lat) / h;
-    v.av = result.av;
-    v.axPrev = result.axPrev;
-    v.ayPrev = result.ayPrev;
+  const accFwd = (result.vx - fwd) / h;
+  const accLat = (result.vy - lat) / h;
+  v.av = result.av;
+  v.axPrev = result.axPrev;
+  v.ayPrev = result.ayPrev;
 
-    const rearSpin = result.vx / WHEEL_RADIUS;
-    v.omega[2] = rearSpin;
-    v.omega[3] = rearSpin;
+  const rearSpin = result.vx / WHEEL_RADIUS;
+  v.omega[2] = rearSpin;
+  v.omega[3] = rearSpin;
 
-    // Back to world along the same two basis vectors.
-    v.vx += h * (-sinY * accFwd + cosY * accLat);
-    v.vz += h * (-cosY * accFwd - sinY * accLat);
+  // Back to world along the same two basis vectors.
+  v.vx += h * (-sinY * accFwd + cosY * accLat);
+  v.vz += h * (-cosY * accFwd - sinY * accLat);
 
-    v.x += h * v.vx;
-    v.z += h * v.vz;
-    v.yaw += h * v.av;
+  v.x += h * v.vx;
+  v.z += h * v.vz;
+  v.yaw += h * v.av;
 
-    if (!Number.isFinite(v.x) || !Number.isFinite(v.z) || !Number.isFinite(v.vx)) {
-      resetToSpawn(v);
-      break;
-    }
-
-    // Re-query after moving: the barrier test has to see where the car ended up,
-    // and the next substep gets the surface it is actually on.
-    sample = track.query(v.x, v.z);
-    if (Math.abs(sample.lateral) > sample.wallLimit) {
-      const sign = sample.lateral > 0 ? -1 : 1;
-      const penetration = Math.abs(sample.lateral) - sample.wallLimit;
-      applyWallImpulse(v, sample.normal.x, sample.normal.z, sign, penetration);
-      sample = track.query(v.x, v.z);
-    }
-
-    v.wheelSpin += h * (v.omega[2] + v.omega[3]) * 0.5;
+  if (!Number.isFinite(v.x) || !Number.isFinite(v.z) || !Number.isFinite(v.vx)) {
+    resetToSpawn(v);
+    return;
   }
+
+  // Re-query after moving: the barrier test has to see where the car ended up.
+  sample = track.query(v.x, v.z);
+  if (Math.abs(sample.lateral) > sample.wallLimit) {
+    const sign = sample.lateral > 0 ? -1 : 1;
+    const penetration = Math.abs(sample.lateral) - sample.wallLimit;
+    applyWallImpulse(v, sample.normal.x, sample.normal.z, sign, penetration);
+  }
+
+  v.wheelSpin += h * (v.omega[2] + v.omega[3]) * 0.5;
 }
 
 export function applyWallImpulse(v, nx, nz, sign, penetration) {

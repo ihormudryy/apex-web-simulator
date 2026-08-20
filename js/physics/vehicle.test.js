@@ -3,9 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createVehicle, advance, updateSteering, resolvePedals,
-  forwardSpeed, lateralSpeed, travelYaw, speed, REVERSE_THRESHOLD,
+  forwardSpeed, lateralSpeed, travelYaw, speed, REVERSE_THRESHOLD, renderPose,
 } from './vehicle.js';
 import { WB } from './bicycle.js';
+import { MAX_CATCHUP, DT as SIM_DT } from './fixedStep.js';
 
 const DT = 1 / 60;
 const flat = {
@@ -77,7 +78,12 @@ test('an over-long frame is clamped rather than teleporting the car', () => {
   const before = { x: car.x, z: car.z };
   advance(car, input, flat, 10);            // a ten second stall
   const moved = Math.hypot(car.x - before.x, car.z - before.z);
-  assert.ok(moved < 60 * 0.05 + 1, `car jumped ${moved.toFixed(1)} m on one frame`);
+  // The ceiling is the accumulator's catch-up budget: time past it is dropped,
+  // so the sim runs slow for a moment rather than teleporting the car.
+  assert.ok(
+    moved < 60 * MAX_CATCHUP + 1,
+    `car jumped ${moved.toFixed(1)} m on one frame`,
+  );
   assert.equal(car.resets, 0);
 });
 
@@ -174,4 +180,92 @@ test('creeping with the wheel turned follows the Ackermann arc', () => {
     checked++;
   }
   assert.ok(checked > 100, `only ${checked} samples fell in the crawl band`);
+});
+
+// ---------------------------------------------------------------------------
+// Determinism. The whole point of the fixed step is that these hold.
+// ---------------------------------------------------------------------------
+
+/** Drive a scripted lap of inputs, chopping the same total time into `fps` frames. */
+function scripted(fps, seconds = 3) {
+  const car = createVehicle({});
+  const frames = Math.round(fps * seconds);
+  for (let i = 0; i < frames; i++) {
+    const t = i / fps;
+    // A shape with throttle, coasting, braking and steering in both directions,
+    // so the comparison exercises every branch in the kernel.
+    const input = keys({
+      forward: t < 1.2 || (t > 2.0 && t < 2.5),
+      brake: t >= 1.6 && t < 2.0,
+      left: t > 0.5 && t < 1.5,
+      right: t > 2.2,
+    });
+    updateSteering(car, input, 1 / fps);
+    advance(car, input, flat, 1 / fps);
+  }
+  return car;
+}
+
+test('the trajectory barely depends on frame rate — 30, 60 and 144 fps agree', () => {
+  const a = scripted(30);
+  const b = scripted(60);
+  const c = scripted(144);
+  // Steering is still integrated on frame dt (it is a driver model, not physics),
+  // so these are not bit-identical; the physics itself is, given the same steer.
+  for (const [label, ref, other] of [['60 vs 30', b, a], ['60 vs 144', b, c]]) {
+    const gap = Math.hypot(ref.x - other.x, ref.z - other.z);
+    const path = Math.hypot(ref.x, ref.z);
+    assert.ok(
+      gap < Math.max(1.0, path * 0.02),
+      `${label}: ${gap.toFixed(2)} m apart on a ${path.toFixed(0)} m path`,
+    );
+  }
+});
+
+test('identical input at identical frame times is bit-exact, run to run', () => {
+  const a = scripted(60);
+  const b = scripted(60);
+  for (const k of ['x', 'z', 'yaw', 'vx', 'vz', 'av']) {
+    assert.equal(a[k], b[k], `${k} drifted between two identical runs`);
+  }
+});
+
+test('sim time tracks wall time to within one step, on any frame pattern', () => {
+  // A pathological but realistic pattern: vsync misses and recoveries. Whatever
+  // the shape, the accumulator must neither gain nor lose time — anything else is
+  // a sim that runs fast or slow depending on the machine it is on.
+  const patterns = {
+    steady: [1 / 60],
+    jittery: [1 / 60, 1 / 30, 1 / 144, 1 / 60, 1 / 20, 1 / 240],
+    fast: [1 / 240],
+  };
+  for (const [label, pattern] of Object.entries(patterns)) {
+    const car = createVehicle({});
+    let wall = 0;
+    for (let i = 0; wall < 2; i++) {
+      const dt = pattern[i % pattern.length];
+      advance(car, keys({ forward: true }), flat, dt);
+      wall += dt;
+    }
+    const gap = Math.abs(car.clock.simTime - wall);
+    assert.ok(gap < SIM_DT, `${label}: sim time is ${gap.toFixed(5)} s off wall time`);
+  }
+});
+
+test('renderPose interpolates between the last two sim states', () => {
+  const car = launched(50);
+  advance(car, keys({ forward: true }), flat, 1 / 60);
+  const pose = renderPose(car);
+  const lo = Math.min(car.prev.z, car.z);
+  const hi = Math.max(car.prev.z, car.z);
+  assert.ok(pose.z >= lo && pose.z <= hi, `${pose.z} outside [${lo}, ${hi}]`);
+  // And it must not be reading the raw state, which is what caused the stutter.
+  assert.notEqual(car.prev.z, car.z, 'a frame at 60 fps must take several steps');
+});
+
+test('renderPose writes into a caller-supplied object, allocating nothing', () => {
+  const car = launched(50);
+  advance(car, keys({ forward: true }), flat, 1 / 60);
+  const out = { x: 0, z: 0, yaw: 0 };
+  assert.equal(renderPose(car, out), out, 'must return the same object it was given');
 });
