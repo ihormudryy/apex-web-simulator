@@ -9,6 +9,7 @@
 
 import { step } from './bicycle.js';
 import { createClock, resetClock, pump, DT, lerp } from './fixedStep.js';
+import { packInput, recordStep } from './replay.js';
 
 /** Below this forward speed, "reverse" means reverse rather than brake. */
 export const REVERSE_THRESHOLD = 0.5;
@@ -43,6 +44,10 @@ export function createVehicle({ x = 0, z = 0, yaw = 0 } = {}) {
     // exists to remove.
     prev: { x, z, yaw },
     pedals: { throttle: 0, brake: false },
+    /** Set to a recording to capture inputs on the sim clock. See replay.js. */
+    recorder: null,
+    /** Set to a callback to observe every sim step — telemetry, trajectory diff. */
+    observer: null,
   };
 }
 
@@ -125,6 +130,9 @@ export function resolvePedals(v, input) {
  * indirection. `renderPose` is what the scene graph should read.
  */
 export function advance(v, input, track, dt) {
+  // A replayed input carries the steer angle with it, because steering is
+  // integrated on the frame clock and so cannot be reproduced from keys alone.
+  if (typeof input.steer === 'number') v.steerAngle = input.steer;
   const { brake, throttle } = resolvePedals(v, input);
   // Brake lights follow brake or reverse, so they stay lit through the handover
   // from "reverse key is braking" to "reverse key is reversing".
@@ -133,11 +141,35 @@ export function advance(v, input, track, dt) {
   v.pedals.brake = brake;
   v.wheelSpin = 0;
 
+  const flags = v.recorder ? packInput(input) : 0;
   pump(
     v.clock, dt,
-    () => simStep(v, throttle, brake, track),
+    () => {
+      // Recorded *before* the step, so replaying the sequence reproduces the same
+      // state transitions in the same order.
+      if (v.recorder) recordStep(v.recorder, flags, v.steerAngle);
+      simStep(v, throttle, brake, track);
+      if (v.observer) v.observer(v);
+    },
     () => snapshotPose(v),
   );
+}
+
+/**
+ * One sim step from a recorded input, for replay. Bypasses the accumulator: a
+ * replay is a sequence of steps, not a sequence of frames, which is precisely
+ * what makes it reproducible.
+ */
+export function replayStep(v, input, track) {
+  if (typeof input.steer === 'number') v.steerAngle = input.steer;
+  const { brake, throttle } = resolvePedals(v, input);
+  v.braking = brake || throttle < 0;
+  v.pedals.throttle = throttle;
+  v.pedals.brake = brake;
+  snapshotPose(v);
+  simStep(v, throttle, brake, track);
+  v.clock.simTime += DT;
+  if (v.observer) v.observer(v);
 }
 
 function snapshotPose(v) {
