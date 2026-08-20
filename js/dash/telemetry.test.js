@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import {
   createTelemetry, formatLapTime, formatDelta, formatSector,
 } from './telemetry.js';
-import { createVehicle } from '../physics/vehicle.js';
+import {
+  createVehicle, launchVehicle, advance, forwardSpeed,
+} from '../physics/vehicle.js';
 import { MU } from '../physics/bicycle.js';
 
 const LAP = 5891;
@@ -141,26 +143,43 @@ test('sector splits add up to the lap time', () => {
     `splits total ${total.toFixed(2)} against a ${snapshot.bestLapTime.toFixed(2)} lap`);
 });
 
+/** A car that has actually been driven, so the kernel's loads and aero are live. */
+function drivenCar(speedMs, track) {
+  const car = fakeCar();
+  launchVehicle(car.vehicle, speedMs);
+  for (let i = 0; i < 240; i++) {
+    // Hold the speed rather than accelerating away from it.
+    const forward = forwardSpeed(car.vehicle) < speedMs;
+    advance(car.vehicle, { forward, left: false, right: false, brake: false }, track, DT);
+  }
+  return car;
+}
+
 test('the grip limit grows with downforce', () => {
   const telemetry = createTelemetry({ lapLength: LAP });
   const track = fakeTrack();
-  const slow = telemetry.sample(fakeCar({ vehicle: { vz: -10 } }), track, DT);
-  const fast = telemetry.sample(fakeCar({ vehicle: { vz: -80 } }), track, DT);
-  // Bounded against MU rather than a literal: at walking pace the grip limit
-  // *is* the friction coefficient, so hardcoding 1.6 here just restated the
-  // constant and broke when it was recalibrated to 1.85.
+  // Driven rather than hand-posed: the grip limit now comes from the kernel's own
+  // per-corner loads, so it only means anything once the car has been stepped and
+  // the aero has loaded it.
+  const slow = telemetry.sample(drivenCar(10, track), track, DT);
+  const fast = telemetry.sample(drivenCar(80, track), track, DT);
+  // Bounded against MU rather than a literal: at walking pace the grip limit is
+  // essentially the friction coefficient. It lands a little above it, because the
+  // rear tyres are the wider ones — the four-corner average of the axle scales is
+  // 1.075, and that is a real property of the car rather than slack in the test.
   assert.ok(
-    Math.abs(slow.gripLimitG - MU.tarmac) < 0.1,
-    `at 10 m/s the limit should be about mu (${MU.tarmac}), got ${slow.gripLimitG}`,
+    slow.gripLimitG > MU.tarmac * 0.95 && slow.gripLimitG < MU.tarmac * 1.2,
+    `at 10 m/s the limit should be near mu (${MU.tarmac}), got ${slow.gripLimitG}`,
   );
   assert.ok(fast.gripLimitG > 4, `at 80 m/s the tyres should carry over 4 g, got ${fast.gripLimitG}`);
 });
 
 test('grass reports less grip than tarmac at the same speed', () => {
   const telemetry = createTelemetry({ lapLength: LAP });
-  const car = fakeCar({ vehicle: { vz: -30 } });
-  const onTarmac = telemetry.sample(car, fakeTrack('tarmac'), DT);
-  const onGrass = telemetry.sample(car, fakeTrack('grass'), DT);
+  const tarmacTrack = fakeTrack('tarmac');
+  const grassTrack = fakeTrack('grass');
+  const onTarmac = telemetry.sample(drivenCar(30, tarmacTrack), tarmacTrack, DT);
+  const onGrass = telemetry.sample(drivenCar(30, grassTrack), grassTrack, DT);
   assert.ok(onGrass.gripLimitG < onTarmac.gripLimitG / 3);
   assert.equal(onGrass.offTrack, true);
   assert.equal(onTarmac.offTrack, false);

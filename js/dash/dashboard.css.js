@@ -25,12 +25,12 @@ export const DASH_CSS = `
   --blue: #35b6ff;
 
   position: absolute;
-  left: 0; right: 0; bottom: 0;
+  left: 0; right: 0; top: 0;
   display: flex;
   justify-content: center;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 10px;
-  padding: 0 14px 14px;
+  padding: 14px 14px 0;
   z-index: 150;
   /* A readout must never eat the drag-to-orbit controls on the canvas. */
   pointer-events: none;
@@ -40,7 +40,7 @@ export const DASH_CSS = `
   transition: opacity 180ms ease, transform 180ms ease;
 }
 .dash[hidden] { display: none; }
-.dash.dash--off { opacity: 0; transform: translateY(8px); }
+.dash.dash--off { opacity: 0; transform: translateY(-8px); }
 
 .dash__panel {
   position: relative;
@@ -189,13 +189,13 @@ export const DASH_CSS = `
 .dash__surface--grass { color: var(--red); }
 
 .dash__hint {
-  position: absolute; right: 16px; bottom: 4px;
+  position: absolute; right: 16px; top: 4px;
   font-size: 8px; letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--slate-dim);
 }
 
 @media (max-width: 1080px) {
-  .dash { gap: 7px; padding: 0 8px 8px; }
+  .dash { gap: 7px; padding: 8px 8px 0; }
   .dash__panel--optional { display: none; }
   .dash__track { width: 104px; }
   .dash__speed { font-size: 42px; }

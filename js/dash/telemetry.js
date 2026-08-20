@@ -5,10 +5,12 @@
 // knows nothing about how it was worked out.
 
 import {
-  forwardSpeed, lateralSpeed, speed, resolvePedals,
+  forwardSpeed, lateralSpeed, speed, resolvePedals, telemetryOf,
 } from '../physics/vehicle.js';
-import { MU, MASS, RHO, CLA, G } from '../physics/bicycle.js';
+import { MASS, G } from '../physics/constants.js';
 import { gearFor, rpmFor, shiftFraction } from './gearbox.js';
+import { peakGrip, muScaleFor, gripFromTemperature, gripFromWear } from '../physics/wheel.js';
+import { socFraction, BATTERY_CAPACITY } from '../physics/powertrain.js';
 
 const RAD2DEG = 180 / Math.PI;
 /** Steering lock at rest, matching `vehicle.js`. Normalises the steering readout. */
@@ -121,11 +123,18 @@ export function createTelemetry({
     const longG = v.axPrev / G;
     const combinedG = Math.hypot(latG, longG);
 
-    // What the tyres can actually give right now: static weight plus downforce,
-    // on whatever the car is standing on.
-    const downforce = 0.5 * RHO * speedMs * speedMs * CLA;
-    const mu = MU[q.surface] ?? MU.grass;
-    const gripLimitG = mu * (MASS * G + downforce) / (MASS * G);
+    // What the tyres can actually give right now. Read off the kernel's own
+    // per-wheel state rather than recomputed from a lumped ClA and one surface
+    // type: the loads include the suspension, the downforce includes ride height,
+    // and each corner has its own surface, temperature and wear.
+    const sim = telemetryOf(v);
+    let gripN = 0;
+    for (let i = 0; i < 4; i++) {
+      const surf = v.car.surfaces[i];
+      const scale = gripFromTemperature(sim.tyreT[i]) * gripFromWear(sim.tyreWear[i]);
+      gripN += peakGrip(surf.mu, sim.fz[i], scale * muScaleFor(i < 2));
+    }
+    const gripLimitG = gripN / (MASS * G);
 
     state.peakG = Math.max(combinedG, state.peakG - PEAK_DECAY * dt);
 
@@ -161,8 +170,11 @@ export function createTelemetry({
       state.sector = sector;
     }
 
-    const gear = fwd < -0.5 ? 'R' : gearFor(speedMs);
-    const rpm = rpmFor(speedMs, gear === 'R' ? 1 : gear);
+    // The real gear and the real rpm, from the driveline. These used to be derived
+    // backwards from road speed, so the tacho and the engine note were both a
+    // function of how fast the scenery was moving rather than of the drivetrain.
+    const gear = fwd < -0.5 ? 'R' : sim.gear;
+    const rpm = sim.rpm;
 
     return {
       speedMs,
@@ -184,6 +196,26 @@ export function createTelemetry({
       gripLimitG,
       tractionUse: gripLimitG > 0 ? Math.min(1.4, combinedG / gripLimitG) : 0,
       slipDeg: Math.abs(fwd) > SLIP_FLOOR ? Math.atan2(lat, fwd) * RAD2DEG : 0,
+
+      // Per-corner state, for the dashboard, the audio and the effects.
+      tyreT: sim.tyreT,
+      tyreWear: sim.tyreWear,
+      brakeT: sim.brakeT,
+      wheelLoad: sim.fz,
+      slipRatio: sim.slipRatio,
+      slipAngle: sim.slipAngle,
+      slipSpeed: sim.slipSpeed,
+      rideFront: sim.rideFront,
+      rideRear: sim.rideRear,
+      downforce: sim.downforce,
+      drag: sim.drag,
+      drs: sim.drs,
+      ersCharge: socFraction({ soc: sim.soc }),
+      boost: sim.boost,
+      clutch: sim.clutch,
+      steerTorque: sim.steerTorque,
+      plankContact: sim.plankContact,
+      onBumpStop: sim.onBumpStop,
 
       surface: q.surface,
       offTrack: q.surface !== 'tarmac',

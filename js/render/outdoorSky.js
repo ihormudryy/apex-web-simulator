@@ -31,18 +31,20 @@ export function outdoorSkyData({
       let r, g, b;
       if (elev < 0) {
         const t = Math.min(1, -elev / (Math.PI * 0.5));
-        r = 0.03 + 0.01 * t;
-        g = 0.055 + 0.02 * t;
-        b = 0.02;
+        // Ground-bounce IBL. Near-black nadir crushed every downward-facing
+        // fragment (chassis, tyres, CSM shadows) to zero.
+        r = 0.16 + 0.04 * t;
+        g = 0.15 + 0.03 * t;
+        b = 0.12 + 0.02 * t;
       } else {
         const t = Math.min(1, elev / (Math.PI * 0.5));
         // Display-referred linear. This map is the scene background and the IBL
         // source; a ×4 sky plus a wide corona averaged to ~3.6 nits and ACES
         // washed every material. Keep fill around 0.3–1.2 and a small hot sun
         // so the directional light can own direct lighting and shadows.
-        r = 0.42 * (1 - t) + 0.08 * t;
-        g = 0.58 * (1 - t) + 0.18 * t;
-        b = 0.88 * (1 - t) + 0.62 * t;
+        r = 0.50 * (1 - t) + 0.12 * t;
+        g = 0.66 * (1 - t) + 0.24 * t;
+        b = 0.92 * (1 - t) + 0.68 * t;
       }
 
       const du = Math.min(Math.abs(u - sunU), 1 - Math.abs(u - sunU));

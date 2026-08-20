@@ -4,6 +4,17 @@ import { ribbonTileUV } from '../render/ribbonUV.js';
 import {
   tileableHeight, albedoFromHeight, normalFromHeight, roughnessFromHeight,
 } from '../render/asphaltMaps.js';
+import { tileableGrassHeight, grassAlbedoFromHeight } from '../render/grassMaps.js';
+import { lineWearAlbedo, lineWearRoughness } from '../render/lineWearMaps.js';
+import {
+  asphaltSurfaceMap,
+  ALBEDO_MUL_MIN, ALBEDO_MUL_MAX, ROUGH_MUL_MIN, ROUGH_MUL_MAX,
+} from '../render/asphaltSurface.js';
+import { composeOnBeforeCompile } from '../render/composeOnBeforeCompile.js';
+import { createGrassTufts } from './grassTufts.js';
+import { createCatchFence } from './catchFence.js';
+import { createTracksideProps } from './tracksideProps.js';
+import { createTracksideLOD } from './tracksideLOD.js';
 
 const DEG90 = Math.PI / 2;
 
@@ -19,6 +30,10 @@ const START_LINE_WIDTH = 0.5;
 // One wrap of the asphalt PBR tile. 4 m is a slight stretch so Hamilton
 // Straight does not read as a stamped pattern from the chase cam.
 const ASPHALT_TILE_M = 4;
+// Close runoff: one wrap of the lawn PBR tile. Distant infield uses a longer
+// period so the 1k map does not strobe from the chase cam.
+const GRASS_RUNOFF_TILE_M = 5;
+const GRASS_GROUND_TILE_M = 16;
 
 // Heights, in metres. Ordered so a marking is never below the surface it is
 // painted on.
@@ -62,13 +77,18 @@ export class Track extends THREE.Group {
    *   the circuit. Must exceed the scene's `fog.far`, or the edge of the world is
    *   visible from the far side of the track.
    */
-  constructor(waypoints, { sampleCount = 4000, spawnT = 0, groundMargin = 1600 } = {}) {
+  constructor(waypoints, {
+    sampleCount = 4000, spawnT = 0, groundMargin = 1600, surfaceNodes = null,
+  } = {}) {
     super();
 
     this.centerline = buildCenterline(waypoints, sampleCount);
     this.samples = this.centerline.samples;
     this.spawnT = spawnT;
     this.groundMargin = groundMargin;
+    // `tslSurfaceNodes` on the WebGPU path, null on WebGL. Present means build
+    // node materials, because NodeMaterial never runs `onBeforeCompile`.
+    this._surfaceNodes = surfaceNodes;
     this._hint = 0;
 
     this._build();
@@ -106,16 +126,16 @@ export class Track extends THREE.Group {
     this.add(this._ribbon(
       s => s.halfWidth + s.runoff,
       s => -(s.halfWidth + s.runoff),
-      layered(new THREE.MeshStandardMaterial({ color: 0x4a7a3c, roughness: 1, metalness: 0 }), 'runoff'),
+      layered(this._grassMaterial(), 'runoff'),
       Y_RUNOFF,
-      { receiveShadow: true }
+      { uvMode: 'metres', tileMetres: GRASS_RUNOFF_TILE_M, receiveShadow: true }
     ));
     this.add(this._ribbon(
       s => s.halfWidth,
       s => -s.halfWidth,
       layered(this._asphaltMaterial(), 'asphalt'),
       Y_ASPHALT,
-      { uvMode: 'metres', tileMetres: ASPHALT_TILE_M, receiveShadow: true }
+      { uvMode: 'metres', tileMetres: ASPHALT_TILE_M, receiveShadow: true, surfaceUv: true }
     ));
 
     const curbMaterial = layered(new THREE.MeshStandardMaterial({
@@ -123,11 +143,7 @@ export class Track extends THREE.Group {
       roughness: 0.6,
       metalness: 0.04,
     }), 'kerb');
-    const edgeMaterial = layered(new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 0.65,
-      metalness: 0,
-    }), 'marking');
+    const edgeMaterial = layered(this._lineWearMaterial(), 'marking');
     // Galvanised Armco. Needs `scene.environment` to have anything to reflect —
     // bare metalness with only direct lights renders navy on the shaded side.
     const barrierMaterial = new THREE.MeshStandardMaterial({
@@ -169,11 +185,23 @@ export class Track extends THREE.Group {
       { receiveShadow: true }
     ));
 
-    this.add(this._startLine(this.samples[this._spawnIndex()], layered(new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 0.65,
-      metalness: 0,
-    }), 'marking')));
+    this.add(this._startLine(this.samples[this._spawnIndex()], layered(this._lineWearMaterial(), 'marking')));
+
+    const grass = createGrassTufts(this.centerline, Y_RUNOFF, {
+      // Keep the kerb constant in one place; the scatter only knows the number.
+      plan: { edgeInset: KERB_WIDTH + 0.25 },
+      surfaceNodes: this._surfaceNodes,
+    });
+    grass.name = 'grassTufts';
+    const fence = createCatchFence(this.centerline);
+    const props = createTracksideProps(this.centerline);
+    this._tracksideLOD = createTracksideLOD({ grass, fence, props });
+    this.add(this._tracksideLOD.root);
+  }
+
+  /** Swap grass / fence / props detail by chase-cam distance. */
+  updateTracksideLOD(camera) {
+    this._tracksideLOD?.update(camera);
   }
 
   /**
@@ -186,38 +214,216 @@ export class Track extends THREE.Group {
     const m = this.groundMargin;
     const width = (b.maxX - b.minX) + 2 * m;
     const depth = (b.maxZ - b.minZ) + 2 * m;
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(width, depth),
-      layered(new THREE.MeshStandardMaterial({ color: 0x3d6b32, roughness: 1, metalness: 0 }), 'ground')
-    );
+    const material = layered(this._grassMaterial({
+      repeatU: width / GRASS_GROUND_TILE_M,
+      repeatV: depth / GRASS_GROUND_TILE_M,
+    }), 'ground');
+    const geometry = new THREE.PlaneGeometry(width, depth);
+    if (material.normalMap) geometry.computeTangents();
+    const ground = new THREE.Mesh(geometry, material);
     ground.rotation.x = -DEG90;
     ground.position.set((b.minX + b.maxX) / 2, Y_GRASS, (b.minZ + b.maxZ) / 2);
     ground.receiveShadow = true;
     return ground;
   }
 
-  _asphaltMaterial() {
-    const size = 512;
-    const height = tileableHeight(size, 3);
-    return new THREE.MeshStandardMaterial({
-      map: this._asphaltDataTexture(albedoFromHeight(height, size), size, THREE.SRGBColorSpace),
-      // Normal strength was too high (appeared like rippling mud/water).
-      normalMap: this._asphaltDataTexture(normalFromHeight(height, size, 3), size, THREE.NoColorSpace),
-      roughnessMap: this._asphaltDataTexture(roughnessFromHeight(height, size), size, THREE.NoColorSpace),
+  _lineWearMaterial() {
+    const width = 512;
+    const height = 32;
+    const mat = new THREE.MeshStandardMaterial({
+      map: this._markingDataTexture(lineWearAlbedo(width, height), width, height, THREE.SRGBColorSpace),
+      roughnessMap: this._markingDataTexture(lineWearRoughness(width, height), width, height, THREE.NoColorSpace),
       color: 0xffffff,
       roughness: 0.72,
       metalness: 0,
-      envMapIntensity: 0.55,
     });
+    return mat;
+  }
+
+  _markingDataTexture(data, width, height, colorSpace) {
+    const texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+    texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(1, 1);
+    // 16 was tried, since the visual dashboard puts the worst instability in the
+    // far-track band where the texture footprint is most anisotropic. No
+    // measurable change (3.79 -> 3.82 instability), so 8 stands.
+    texture.anisotropy = 8;
+    texture.colorSpace = colorSpace;
+    // Painted lines are thin and viewed down a kilometre of straight, so they
+    // alias worse than anything else on the track without a mip chain.
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = true;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
+  _asphaltMaterial() {
+    const size = 512;
+    const height = tileableHeight(size, 3);
+    const params = {
+      map: this._asphaltDataTexture(albedoFromHeight(height, size), size, THREE.SRGBColorSpace),
+      // Normal strength was too high (appeared like rippling mud/water).
+      normalMap: this._asphaltDataTexture(normalFromHeight(height, size, 1.2), size, THREE.NoColorSpace),
+      roughnessMap: this._asphaltDataTexture(roughnessFromHeight(height, size), size, THREE.NoColorSpace),
+      color: 0xffffff,
+      roughness: 0.95,
+      metalness: 0,
+      envMapIntensity: 1.0,
+      normalScale: new THREE.Vector2(0.22, 0.22),
+    };
+    const texture = this._asphaltSurfaceVariationTexture();
+    const range = {
+      albedoMin: ALBEDO_MUL_MIN,
+      albedoSpan: ALBEDO_MUL_MAX - ALBEDO_MUL_MIN,
+      roughMin: ROUGH_MUL_MIN,
+      roughSpan: ROUGH_MUL_MAX - ROUGH_MUL_MIN,
+    };
+    if (this._surfaceNodes) {
+      return this._surfaceNodes.createAsphaltNodeMaterial(params, texture, range);
+    }
+    const material = new THREE.MeshStandardMaterial(params);
+    this._applyAsphaltSurfaceVariation(material, texture, range);
+    return material;
+  }
+
+  /**
+   * The lap-scale variation map: racing line, marbles, resurfacing patches,
+   * paving seam. Addressed by position on the track, not by the tiling detail
+   * UV, because those features span the circuit and never repeat.
+   */
+  _asphaltSurfaceVariationTexture() {
+    const map = asphaltSurfaceMap({ lapLength: this.centerline.length });
+    const texture = new THREE.DataTexture(
+      map.data, map.width, map.height, THREE.RGBAFormat, THREE.UnsignedByteType,
+    );
+    // Round the lap it wraps; across the track it must not, or the far kerb
+    // would bleed rubber onto the near one.
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.colorSpace = THREE.NoColorSpace;   // multipliers, not colour
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = true;
+    // 16 was tried, since the visual dashboard puts the worst instability in the
+    // far-track band where the texture footprint is most anisotropic. No
+    // measurable change (3.79 -> 3.82 instability), so 8 stands.
+    texture.anisotropy = 8;
+    texture.needsUpdate = true;
+    this._asphaltSurfaceTexture = texture;
+    return texture;
+  }
+
+  /**
+   * Multiply lap-scale variation into the asphalt: racing line, marbles,
+   * resurfacing patches, paving seam.
+   *
+   * The detail maps tile every 4 m, which is right for aggregate and useless for
+   * anything that spans the circuit, so this comes from a separate map addressed
+   * by position on the track — `aSurfaceUv`, emitted by `_ribbon`. All the
+   * profile maths lives in `asphaltSurface.js` where it is unit-tested; the
+   * shader only samples and multiplies, so there is no second copy in GLSL.
+   *
+   * The WebGL path only — `tslSurfaceNodes.createAsphaltNodeMaterial` builds the
+   * same effect as a node graph for WebGPU, from the same map and ranges.
+   */
+  _applyAsphaltSurfaceVariation(material, texture, range) {
+    const albedoMin = range.albedoMin.toFixed(5);
+    const albedoSpan = range.albedoSpan.toFixed(5);
+    const roughMin = range.roughMin.toFixed(5);
+    const roughSpan = range.roughSpan.toFixed(5);
+
+    const inject = shader => {
+      shader.uniforms.uAsphaltSurface = { value: texture };
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>
+        attribute vec2 aSurfaceUv;
+        varying vec2 vSurfaceUv;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+        vSurfaceUv = aSurfaceUv;`);
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+        uniform sampler2D uAsphaltSurface;
+        varying vec2 vSurfaceUv;`)
+        .replace('#include <map_fragment>', `#include <map_fragment>
+        vec4 surf = texture2D( uAsphaltSurface, vSurfaceUv );
+        diffuseColor.rgb *= ${albedoMin} + surf.r * ${albedoSpan};
+        // Rubber is cool-neutral, so where it has built up it takes the warm cast
+        // off the aggregate rather than only darkening it. This replaces a
+        // desaturation toward the albedo's own luminance, which was a no-op here:
+        // asphalt albedo is already near-neutral. The TSL path had the same term
+        // and it was actively wrong there — see tslSurfaceNodes.js.
+        diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 0.93, 0.97, 1.05 ), surf.b );`)
+        // `surf` is still in scope here: both chunks expand inside main(), and
+        // roughnessmap_fragment follows map_fragment. Re-fetching the same texel
+        // cost a second dependent read per fragment across the whole track.
+        .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        roughnessFactor *= ${roughMin} + surf.g * ${roughSpan};`);
+    };
+
+    // CSM assigns its own onBeforeCompile to every standard material in the
+    // scene, so this must compose rather than assign — see the helper.
+    composeOnBeforeCompile(material, inject, 'asphaltSurface');
   }
 
   _asphaltDataTexture(data, size, colorSpace) {
     const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
     texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+    // 16 was tried, since the visual dashboard puts the worst instability in the
+    // far-track band where the texture footprint is most anisotropic. No
+    // measurable change (3.79 -> 3.82 instability), so 8 stands.
     texture.anisotropy = 8;
     texture.colorSpace = colorSpace;
+    // `DataTexture` defaults to NearestFilter with no mip chain, which point
+    // samples the surface that occupies most of the screen and recedes to the
+    // horizon — the single largest source of aliasing in the scene. Measured at
+    // 6.01/255 sub-pixel instability with 23% of pixels at single-pixel scale;
+    // MSAA cannot touch it, because this is texture aliasing, not edge coverage.
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = true;
     texture.needsUpdate = true;
     return texture;
+  }
+
+  _grassMaterial({ repeatU = 1, repeatV = 1 } = {}) {
+    const size = 512;
+    const height = tileableGrassHeight(size, 11);
+    const mat = new THREE.MeshStandardMaterial({
+      map: this._asphaltDataTexture(grassAlbedoFromHeight(height, size), size, THREE.SRGBColorSpace),
+      normalMap: this._asphaltDataTexture(normalFromHeight(height, size, 1.6), size, THREE.NoColorSpace),
+      roughnessMap: this._asphaltDataTexture(roughnessFromHeight(height, size), size, THREE.NoColorSpace),
+      // Neutral: grassAlbedoFromHeight already returns finished lawn colour.
+      // A green tint here multiplied the greens and crushed red/blue to emerald.
+      color: 0xffffff,
+      roughness: 0.92,
+      metalness: 0,
+      envMapIntensity: 0.85,
+      normalScale: new THREE.Vector2(0.35, 0.35),
+    });
+    for (const t of [mat.map, mat.normalMap, mat.roughnessMap]) {
+      t.repeat.set(repeatU, repeatV);
+    }
+    this._tryBindGrassFiles(mat, repeatU, repeatV);
+    return mat;
+  }
+
+  _tryBindGrassFiles(mat, repeatU, repeatV) {
+    const loader = new THREE.TextureLoader();
+    const bind = (url, colorSpace, key) => {
+      loader.load(url, tex => {
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.anisotropy = 8;
+        tex.colorSpace = colorSpace;
+        tex.repeat.set(repeatU, repeatV);
+        mat[key] = tex;
+        mat.needsUpdate = true;
+      });
+    };
+    // Albedo stays the generated cool green. leafy_grass_diff is brown leaf
+    // litter; under ACES it reads as sand. Keep only its micro-normal/roughness.
+    bind('obj/textures/grass/leafy_grass_nor_gl_1k.jpg', THREE.NoColorSpace, 'normalMap');
+    bind('obj/textures/grass/leafy_grass_rough_1k.jpg', THREE.NoColorSpace, 'roughnessMap');
   }
 
   /**
@@ -232,12 +438,17 @@ export class Track extends THREE.Group {
     tileMetres = 1,
     receiveShadow = false,
     castShadow = false,
+    surfaceUv = false,
   } = {}) {
     const n = this.samples.length;
     const lap = this.centerline.length;
     const vertices = new Float32Array((n + 1) * 6);
     const normals = new Float32Array((n + 1) * 6);
     const uvs = new Float32Array((n + 1) * 4);
+    // Un-tiled position on the surface: x round the lap, y across the width.
+    // The regular `uv` tiles every few metres to carry aggregate, so it cannot
+    // also address a feature that spans the whole circuit.
+    const surface = surfaceUv ? new Float32Array((n + 1) * 4) : null;
     const indices = new Uint32Array(n * 6);
 
     for (let i = 0; i <= n; i++) {
@@ -267,6 +478,15 @@ export class Track extends THREE.Group {
       uvs[i * 4 + 1] = uv.v0;
       uvs[i * 4 + 2] = uv.u1;
       uvs[i * 4 + 3] = uv.v1;
+      if (surface) {
+        const along = i / n;
+        // v = 1 at the `left` edge, 0 at the `right` one, matching the map's
+        // lateral axis which runs -1 .. +1 across the racing surface.
+        surface[i * 4] = along;
+        surface[i * 4 + 1] = 1;
+        surface[i * 4 + 2] = along;
+        surface[i * 4 + 3] = 0;
+      }
     }
 
     for (let i = 0; i < n; i++) {
@@ -284,6 +504,9 @@ export class Track extends THREE.Group {
     geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    if (surface) {
+      geometry.setAttribute('aSurfaceUv', new THREE.BufferAttribute(surface, 2));
+    }
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeBoundingSphere();
 
@@ -387,6 +610,8 @@ export class Track extends THREE.Group {
     geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(
       new Float32Array([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]), 3));
+    geometry.setAttribute('uv', new THREE.BufferAttribute(
+      new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), 2));
     geometry.setIndex([0, 2, 1, 1, 2, 3]);
     geometry.computeBoundingSphere();
     const line = new THREE.Mesh(geometry, material);
@@ -407,6 +632,9 @@ export class Track extends THREE.Group {
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
     texture.repeat.set(this.centerline.length / tileMetres, 1);
+    // 16 was tried, since the visual dashboard puts the worst instability in the
+    // far-track band where the texture footprint is most anisotropic. No
+    // measurable change (3.79 -> 3.82 instability), so 8 stands.
     texture.anisotropy = 8;
     texture.colorSpace = THREE.SRGBColorSpace;
     return texture;

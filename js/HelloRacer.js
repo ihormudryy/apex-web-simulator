@@ -4,20 +4,18 @@ import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { Car } from './Car.js';
 import { MaterialPanel } from './MaterialPanel.js';
 import { createSilverstone } from './track/Silverstone.js';
-import { nextCameraMode } from './cameraModes.js';
-import { EngineAudio } from './audio/EngineAudio.js';
+import { nextCameraMode, DRIVER_CAMERA, CAMERA_NEAR } from './cameraModes.js';
 import { Dashboard } from './dash/Dashboard.js';
 import { createTelemetry } from './dash/telemetry.js';
-import { setPose } from './physics/vehicle.js';
-import { CSM } from 'three/addons/csm/CSM.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import {
   directionFromEquirectUV, sunDirectionFromEquirect, horizonColorFromEquirect,
 } from './render/equirect.js';
 import { outdoorSkyData, DEFAULT_SUN_U, DEFAULT_SUN_V } from './render/outdoorSky.js';
+import { createRendererBackend } from './render/rendererBackend.js';
+import { setSunLightDirection } from './render/sunLightDirection.js';
+import { EngineAudio } from './audio/EngineAudio.js';
+import { setPose } from './physics/vehicle.js';
+import { GroundedSkybox } from 'three/addons/objects/GroundedSkybox.js';
 
 const SKY_COLOR = 0xa8d6ff;
 const FOG_NEAR = 250;
@@ -42,9 +40,21 @@ const CHASE_HEIGHT_BIAS = 0.38;      // metres of lift on top of the boom's own 
 const CHASE_FOV_GAIN = 5;            // degrees of extra field of view at speed
 const CHASE_REFERENCE_SPEED = 80;    // m/s, near the car's top speed
 const CHASE_FOLLOW_STIFFNESS = 0.02; // lower follows harder; 0.08 lagged ~0.4 s
-const SHADOW_RADIUS = 40;
-const SHADOW_DISTANCE = 90;
 const HDRI_URL = 'obj/textures/sky/kloofendal_48d_partly_cloudy_puresky_2k.hdr';
+// Ground-projected dome: radius must exceed fog.far; height sets where the
+// horizon meets the track plane.
+const SKYBOX_HEIGHT = 1.6;
+const SKYBOX_RADIUS = 2200;
+// `GroundedSkybox` flattens its lower hemisphere into a disc at `position.y -
+// height`. That disc is opaque terrain-height geometry, so it has to sit below
+// every real surface or it submerges them: with both values at 1.6 the disc
+// landed at exactly y=0, above the runoff lawn (-0.04) and the infield (-0.25),
+// and painted the HDRI's poorly-sampled bottom pole over the entire verge. Only
+// the parts of the grass tufts above y=0 showed through, like reeds in a lake.
+// The real ground reaches 1610 m and fog saturates at 1400 m, so the disc is
+// never needed as ground — it only has to stay out of the way.
+const SKYBOX_GROUND_Y = -0.35;
+const SKYBOX_Y = SKYBOX_HEIGHT + SKYBOX_GROUND_Y;
 
 class HelloRacer {
   constructor() {
@@ -57,7 +67,6 @@ class HelloRacer {
     this.track = null;
     this.dashboard = null;
     this.telemetry = null;
-    this.engineAudio = new EngineAudio();
     this._camRadius = CHASE_DISTANCE;
     this._pitch = CHASE_PITCH;
     this._yaw = 0;
@@ -80,16 +89,29 @@ class HelloRacer {
     this._right = new THREE.Vector3();
     this._sunDir = new THREE.Vector3();
     this._envMap = null;
+    this._skybox = null;
+    this._rendererBackend = 'webgl';
+    this._useCsm = true;
+    this._useComposer = true;
+    this._useRenderPipeline = false;
     this._csm = null;
+    this._sunLight = null;
+    this._webgpuCsm = null;
+    this._renderPipeline = null;
+    this._webgpuPost = null;
     this._composer = null;
-    this._ssaoPass = null;
+    this._aoPass = null;
     this._csmMaterialsReady = false;
     this._csmMaterialSet = new WeakSet();
     this._csmMaterialScanFrames = 120;
     this._bounceLight = null;
+    this.engineAudio = new EngineAudio();
     this._fx = {
       csm: true,
-      ssao: true,
+      // GTAO (replaces SSAO): depth+normal AO in linear HDR before OutputPass.
+      // Toggle with `1`. Default off — on WebGPU the full TSL stack is ~2× scene
+      // cost (pre-pass + lit pass + GTAO + SSGI + TRAA); WebGL uses GTAOPass.
+      ssao: false,
       bounce: true,
     };
 
@@ -97,7 +119,7 @@ class HelloRacer {
     this._animate = this._animate.bind(this);
   }
 
-  init() {
+  async init() {
     const container = document.getElementById('container');
 
     this.scene = new THREE.Scene();
@@ -112,27 +134,45 @@ class HelloRacer {
     // precision on nothing: at 100 m it could only resolve ~6 cm, while the track
     // ribbons are stacked 2–25 mm apart, which z-fights.
     this.camera = new THREE.PerspectiveCamera(
-      35, window.innerWidth / window.innerHeight, 0.25, VIEW_FAR);
+      35, window.innerWidth / window.innerHeight, CAMERA_NEAR, VIEW_FAR);
     this.camera.position.set(0, 2, 8);
 
     this._setupLights();
 
     try {
-      this.renderer = new THREE.WebGLRenderer({ antialias: true });
+      const backend = await createRendererBackend(THREE, { antialias: true });
+      this.renderer = backend.renderer;
+      this._rendererBackend = backend.backend;
+      this._useCsm = backend.useCsm;
+      this._useComposer = backend.useComposer;
+      this._useRenderPipeline = backend.useRenderPipeline;
     } catch (err) {
       container.innerHTML = '<p style="font:14px sans-serif;padding:2em;text-align:center">This demo needs a browser with WebGL.</p>';
+      console.error(err);
       return;
     }
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.95;
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(this.renderer.domElement);
 
-    this._setupCSMAndPost();
+    if (this._useRenderPipeline) {
+      // Post-processing is optional; the world is not. A throw in here used to
+      // propagate out of `init()` long before the track and car were built, so a
+      // single bad node in the pipeline produced an entirely empty scene rather
+      // than an unfiltered one — and the only clue was one line in the console.
+      // `render()` already falls back to `renderer.render()` when
+      // `_renderPipeline` is null, so degrading is safe.
+      try {
+        await this._setupWebGpuPipeline();
+      } catch (err) {
+        this._renderPipeline = null;
+        console.error(
+          '[HelloRacer] WebGPU render pipeline failed to build — '
+          + 'continuing without post-processing.',
+          err,
+        );
+      }
+    } else if (this._useCsm) {
+      await this._setupCSMAndPost();
+    }
 
     this.stats = new Stats();
     this.stats.dom.style.cssText = 'position:absolute;top:0;z-index:100';
@@ -143,13 +183,20 @@ class HelloRacer {
     document.addEventListener('keyup', e => this._onKeyUp(e));
 
     this._setupMouseControls();
-    // A live AudioContext needs a user gesture; either input counts.
     const unlockAudio = () => this.engineAudio.unlock();
     document.addEventListener('pointerdown', unlockAudio, { once: true });
     document.addEventListener('keydown', unlockAudio, { once: true });
 
+    // NodeMaterial never runs `onBeforeCompile`, so the WebGPU path builds the
+    // asphalt surface variation and the grass sway as TSL node graphs instead.
+    // That module statically imports `three/tsl`, which pulls in the whole WebGPU
+    // build, so the WebGL path must never load it — hence the dynamic import.
+    let surfaceNodes = null;
+    if (this._rendererBackend === 'webgpu') {
+      surfaceNodes = await import('./render/tslSurfaceNodes.js');
+    }
     // The ground has to reach past the fog, or its edge shows on the horizon.
-    this.track = createSilverstone({ groundMargin: FOG_FAR * 1.15 });
+    this.track = createSilverstone({ groundMargin: FOG_FAR * 1.15, surfaceNodes });
     this.scene.add(this.track);
 
     this._loadEnvironment();
@@ -217,7 +264,8 @@ class HelloRacer {
   _applyHdrEnvironment(source) {
     source.mapping = THREE.EquirectangularReflectionMapping;
     source.needsUpdate = true;
-    this.scene.background = source;
+    this.scene.background = null;
+    this._setGroundedSkybox(source);
 
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     const env = pmrem.fromEquirectangular(source).texture;
@@ -225,7 +273,7 @@ class HelloRacer {
     if (this._envMap) this._envMap.dispose();
     this._envMap = env;
     this.scene.environment = env;
-    this.scene.environmentIntensity = 1.05;
+    this.scene.environmentIntensity = 1.0;
     this.renderer.toneMappingExposure = 1.05;
 
     const img = source.image;
@@ -238,7 +286,32 @@ class HelloRacer {
     // CSM wants the direction the light travels, which is away from the sun.
     // Handing it `_sunDir` put all four cascade lights below the ground shining
     // upward, so every upward-facing surface — the whole circuit — went unlit.
-    if (this._csm) this._csm.lightDirection.copy(this._sunDir).negate().normalize();
+    if (this._csm?.lightDirection) {
+      this._csm.lightDirection.copy(this._sunDir).negate().normalize();
+    } else if (this._sunLight) {
+      setSunLightDirection(this._sunLight, this._sunDir);
+    }
+  }
+
+  _setGroundedSkybox(source) {
+    if (this._skybox) {
+      this.scene.remove(this._skybox);
+      this._skybox.geometry.dispose();
+      this._skybox.material.map = null;
+      this._skybox.material.dispose();
+      this._skybox = null;
+    }
+    this._skybox = new GroundedSkybox(source, SKYBOX_HEIGHT, SKYBOX_RADIUS);
+    this._skybox.position.y = SKYBOX_Y;
+    this._skybox.frustumCulled = false;
+    // The sky is what fog fades *into*, so fogging it is circular. The dome sits
+    // at radius 2200 while fog.far is 1400, which saturated the fog factor at
+    // 1.0 over every pixel of it: the whole sky rendered as one flat wash of
+    // fog colour and the HDRI's clouds never appeared. `scene.background` was
+    // immune to this because backgrounds are not fogged — meshes are.
+    this._skybox.material.fog = false;
+    this._skybox.material.needsUpdate = true;
+    this.scene.add(this._skybox);
   }
 
   /**
@@ -251,22 +324,27 @@ class HelloRacer {
     const sun = directionFromEquirectUV(DEFAULT_SUN_U, DEFAULT_SUN_V);
     this._sunDir.set(sun.x, sun.y, sun.z);
 
-    const rim = new THREE.DirectionalLight(0xbcd8ff, 0.35);
+    const rim = new THREE.DirectionalLight(0xbcd8ff, 0.45);
     rim.position.set(-35, 30, -55);
     this.scene.add(rim);
 
-    // “GI” approximation: hemisphere bounce from sky (top) to dark asphalt
-    // (bottom). This is fast but sells underside fill much better than pure
-    // hemispherical defaults.
+    // Fill into CSM shadows. AmbientLight was removed — it is flat and stacked
+    // badly with hemisphere + IBL. The sun + env map own direct lighting now.
     this._bounceLight = new THREE.HemisphereLight(
       new THREE.Color(SKY_COLOR),
-      new THREE.Color(0x4a4a54),
-      0.45,
+      new THREE.Color(0x5a5348),
+      0.55,
     );
     this.scene.add(this._bounceLight);
   }
 
-  _setupCSMAndPost() {
+  async _setupCSMAndPost() {
+    const { CSM } = await import('three/addons/csm/CSM.js');
+    const { EffectComposer } = await import('three/addons/postprocessing/EffectComposer.js');
+    const { RenderPass } = await import('three/addons/postprocessing/RenderPass.js');
+    const { GTAOPass } = await import('three/addons/postprocessing/GTAOPass.js');
+    const { OutputPass } = await import('three/addons/postprocessing/OutputPass.js');
+
     this._csm = new CSM({
       camera: this.camera,
       parent: this.scene,
@@ -276,25 +354,83 @@ class HelloRacer {
       shadowMapSize: 2048,
       shadowBias: -0.00035,
       lightDirection: this._sunDir.clone().negate().normalize(),
-      lightIntensity: 3.0,
+      lightIntensity: 2.2,
       lightNear: 0.5,
       lightFar: FOG_FAR + 200,
       lightMargin: 80,
     });
+    for (const light of this._csm.lights) {
+      light.shadow.intensity = 0.55;
+      // 4 cm of normal bias lifted the painted lines (16–20 mm up) out of the
+      // shadow test, so the white stripe stayed fully lit through the car.
+      light.shadow.normalBias = 0.008;
+      light.shadow.radius = 6;
+    }
 
-    this._composer = new EffectComposer(this.renderer);
-    const renderPass = new RenderPass(this.scene, this.camera);
-    this._composer.addPass(renderPass);
+    // Composer render targets have no MSAA unless asked. The canvas
+    // `antialias: true` only applies to renderer.render(), so SSAO stays on
+    // its own path and the default frame keeps hardware AA.
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    this._composer = new EffectComposer(
+      this.renderer,
+      new THREE.WebGLRenderTarget(size.x, size.y, {
+        type: THREE.HalfFloatType,
+        samples: 4,
+      }),
+    );
+    this._composer.setSize(window.innerWidth, window.innerHeight);
+    this._composer.addPass(new RenderPass(this.scene, this.camera));
 
-    this._ssaoPass = new SSAOPass(this.scene, this.camera, 512, 512, 32);
-    // Less aggressive: crushed blacks were dominated by over-darkening.
-    this._ssaoPass.kernelRadius = 5;
-    this._ssaoPass.minDistance = 0.004;
-    this._ssaoPass.maxDistance = 0.06;
-    this._ssaoPass.enabled = this._fx.ssao;
-    this._composer.addPass(this._ssaoPass);
+    this._aoPass = new GTAOPass(this.scene, this.camera, size.x, size.y);
+    this._aoPass.output = GTAOPass.OUTPUT.Default;
+    this._aoPass.blendIntensity = 0.45;
+    this._aoPass.updateGtaoMaterial({
+      radius: 0.28,
+      distanceExponent: 1,
+      thickness: 1.2,
+      scale: 1,
+      samples: 16,
+      screenSpaceRadius: true,
+    });
+    this._aoPass.updatePdMaterial({ samples: 8, rings: 2, radius: 8 });
+    this._aoPass.enabled = this._fx.ssao;
+    this._composer.addPass(this._aoPass);
 
     this._composer.addPass(new OutputPass());
+  }
+
+  async _setupWebGpuPipeline() {
+    const { createWebGpuSunLight, createWebGpuPost } = await import('./render/webgpuPipeline.js');
+    const { sunLight, csm } = createWebGpuSunLight(
+      THREE,
+      this.scene,
+      this._sunDir,
+      { maxFar: FOG_FAR, lightMargin: 80 },
+    );
+    this._sunLight = sunLight;
+    this._webgpuCsm = csm;
+    this._csm = csm;
+
+    const post = createWebGpuPost(THREE, this.renderer, this.scene, this.camera);
+    this._webgpuPost = post;
+    this._aoPass = post.aoPass;
+    // Full post stack is expensive — only wired when GTAO is toggled on (`1`).
+    this._renderPipeline = null;
+    if (typeof post.setAoEnabled === 'function') {
+      post.setAoEnabled(this._fx.ssao);
+    } else if (post.aoEnabled) {
+      post.aoEnabled.value = this._fx.ssao ? 1 : 0;
+    }
+  }
+
+  _setWebGpuAoEnabled(on) {
+    const post = this._webgpuPost;
+    if (!post) return;
+    if (typeof post.setAoEnabled === 'function') {
+      post.setAoEnabled(on);
+    } else if (post.aoEnabled) {
+      post.aoEnabled.value = on ? 1 : 0;
+    }
   }
 
   _setupMouseControls() {
@@ -368,15 +504,15 @@ class HelloRacer {
     i.right = false;
     i.brake = false;
     this.car._braking = false;
-    if (this.car._steerVisual !== undefined) this.car._steerVisual = 0;
+    this.car._steerVisual = 0;
     if (this.car._steerPivot) this.car._steerPivot.rotation.z = 0;
     for (const w of [this.car.lfw, this.car.rfw, this.car.lrw, this.car.rrw]) {
       if (!w) continue;
       w.rotation.y = 0;
       if (w._spinPivot) w._spinPivot.rotation.z = 0;
     }
-    if (this.car._tyreTempFront !== undefined) this.car._tyreTempFront = 0;
-    if (this.car._tyreTempRear !== undefined) this.car._tyreTempRear = 0;
+    this.car._tyreTempFront = 0;
+    this.car._tyreTempRear = 0;
     if (this.car.brakeMat) {
       this.car.brakeMat.emissive.setHex(0x330000);
       this.car.brakeMat.emissiveIntensity = 0.4;
@@ -430,7 +566,15 @@ class HelloRacer {
     this.car.updateSteering(dt);
     this.car.updatePhysics(dt, this.track);
 
-    if (this._csm) {
+    if (this._skybox) {
+      this._skybox.position.set(
+        this.camera.position.x,
+        SKYBOX_Y,
+        this.camera.position.z,
+      );
+    }
+
+    if (this._csm && this._rendererBackend === 'webgl') {
       // Car meshes arrive asynchronously (BinLoader). Scan for a short window
       // and inject CSM defines into any late materials exactly once.
       if (!this._csmMaterialsReady && this._csmMaterialScanFrames > 0) {
@@ -440,6 +584,12 @@ class HelloRacer {
           for (const m of mats) {
             if (!m) continue;
             if (this._csmMaterialSet.has(m)) continue;
+            // MeshBasic (contact blob) and unlit materials must not get CSM
+            // shader defines — that turned the multiply shadow into a black quad.
+            if (!m.isMeshStandardMaterial && !m.isMeshPhysicalMaterial) {
+              this._csmMaterialSet.add(m);
+              continue;
+            }
             this._csm.setupMaterial(m);
             this._csmMaterialSet.add(m);
           }
@@ -448,17 +598,22 @@ class HelloRacer {
         if (this._csmMaterialScanFrames <= 0) this._csmMaterialsReady = true;
       }
       if (this._fx.csm) this._csm.update();
+    } else if (this._sunLight) {
+      this._sunLight.castShadow = this._fx.csm;
     }
     this._updateCamera(dt);
+    this.track.updateTracksideLOD(this.camera);
 
-    if (this._composer) {
+    if (this._fx.ssao && this._webgpuPost?.renderPipeline) {
+      this._setWebGpuAoEnabled(true);
+      this._webgpuPost.renderPipeline.render();
+    } else if (this._fx.ssao && this._composer) {
       this._composer.render(dt);
     } else {
       this.renderer.render(this.scene, this.camera);
     }
     this.stats.update();
 
-    // After the render, so a slow dashboard frame never holds up the picture.
     const snap = this.telemetry.sample(this.car, this.track, dt);
     this.engineAudio.update(snap);
     if (this.dashboard.visible) this.dashboard.update(snap, dt);
@@ -475,14 +630,23 @@ class HelloRacer {
     return from + (to - from) * (1 - Math.pow(stiffness, dt));
   }
 
-  _setCameraFov(fov) {
+  _setCameraLens(fov, near = CAMERA_NEAR) {
+    let dirty = false;
     if (Math.abs(this.camera.fov - fov) > 0.02) {
       this.camera.fov = fov;
+      dirty = true;
+    }
+    if (Math.abs(this.camera.near - near) > 0.001) {
+      this.camera.near = near;
+      dirty = true;
+    }
+    if (dirty) {
       this.camera.updateProjectionMatrix();
+      if (this._webgpuCsm) this._webgpuCsm.updateFrustums();
     }
   }
 
-  _updateOnboardCamera(alongFwd, height, lookAhead, lookY, fov) {
+  _updateOnboardCamera(alongFwd, height, lookAhead, lookY, fov, near = CAMERA_NEAR) {
     const car = this.car;
     const pos = car.root.position;
     car.headingForward(this._forward);
@@ -497,14 +661,15 @@ class HelloRacer {
       pos.z + this._forward.z * lookAhead
     );
     this.camera.lookAt(this._camTarget);
-    this._setCameraFov(fov);
+    this._setCameraLens(fov, near);
     this._camRoll = 0;
     this._chaseReady = false;
   }
 
   _updateCamera(dt) {
     if (this._viewMode === 'driver') {
-      this._updateOnboardCamera(0.12, 1.06, 16, 0.88, 58);
+      const c = DRIVER_CAMERA;
+      this._updateOnboardCamera(c.alongFwd, c.height, c.lookAhead, c.lookY, c.fov, c.near);
       return;
     }
     if (this._viewMode === 'front') {
@@ -556,6 +721,7 @@ class HelloRacer {
     // Directly opposite `headingForwardAt(followYaw)`, which is
     // (-sin, -cos): the boom is therefore (+sin, +cos). Negating x instead put
     // the camera off to one side at every heading but 0 and 180 degrees.
+    //
     // Both of these are offsets from the car, not world positions, because they
     // are about to be smoothed. Smoothing a world position against a moving car
     // leaves a first-order lag of speed x time-constant: at 200 km/h that was
@@ -590,10 +756,7 @@ class HelloRacer {
 
     const targetFov = this._baseFov + CHASE_FOV_GAIN * speedFraction;
     const nextFov = this._expLerp(this.camera.fov, targetFov, 0.04, dt);
-    if (Math.abs(nextFov - this.camera.fov) > 0.02) {
-      this.camera.fov = nextFov;
-      this.camera.updateProjectionMatrix();
-    }
+    this._setCameraLens(nextFov, CAMERA_NEAR);
   }
 
   _onResize() {
@@ -601,6 +764,7 @@ class HelloRacer {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     if (this._composer) this._composer.setSize(window.innerWidth, window.innerHeight);
+    if (this._webgpuCsm) this._webgpuCsm.updateFrustums();
   }
 
   _setDriveInput(e, down) {
@@ -637,9 +801,10 @@ class HelloRacer {
       return;
     }
     if (e.code === 'Digit1') {
-      if (this._ssaoPass && !e.repeat) {
+      if (!e.repeat) {
         this._fx.ssao = !this._fx.ssao;
-        this._ssaoPass.enabled = this._fx.ssao;
+        if (this._aoPass?.enabled !== undefined) this._aoPass.enabled = this._fx.ssao;
+        this._setWebGpuAoEnabled(this._fx.ssao);
       }
       return;
     }
@@ -651,7 +816,10 @@ class HelloRacer {
       return;
     }
     if (e.code === 'Digit3') {
-      if (!e.repeat) this._fx.csm = !this._fx.csm;
+      if (!e.repeat) {
+        this._fx.csm = !this._fx.csm;
+        if (this._sunLight) this._sunLight.castShadow = this._fx.csm;
+      }
       return;
     }
     if (e.code === 'KeyC') {
@@ -676,8 +844,7 @@ class HelloRacer {
 }
 
 const racer = new HelloRacer();
-racer.init();
-
 // Handle for the console and for the browser smoke checks: there is no other way
 // to reach the live scene, camera or vehicle state from outside the module.
 window.racer = racer;
+racer.init().catch(err => console.error(err));

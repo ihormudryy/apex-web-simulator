@@ -32,6 +32,22 @@ test('sky fill stays display-referred so ACES does not wash the scene', () => {
   assert.ok(hot / n < 0.02, `hot sky fraction ${hot / n}`);
 });
 
+test('sky ground is bright enough to fill the underside of the car', () => {
+  const { data, width, height } = outdoorSkyData({ width: 128, height: 64 });
+  let sum = 0, n = 0;
+  for (let y = 0; y < height; y++) {
+    const v = 1 - (y + 0.5) / height;
+    if (v >= 0.5) continue;
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      sum += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      n++;
+    }
+  }
+  const mean = sum / n;
+  assert.ok(mean > 0.08 && mean < 0.4, `ground fill luminance ${mean}`);
+});
+
 test('generated outdoor sky puts the sun where sunDirectionFromEquirect finds it', () => {
   const { data, width, height } = outdoorSkyData({
     width: 64,

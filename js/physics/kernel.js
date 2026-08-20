@@ -167,9 +167,15 @@ export function createCar({ x = 0, z = 0, yaw = 0, shared = false } = {}) {
     ers: createErsState(),
     brakes: createBrakeState(),
     surfaces: createSurfaceSamples(),
-    /** Per-wheel outputs, for telemetry, audio and the renderer. */
+    /**
+     * Per-wheel outputs, for telemetry, audio and the renderer.
+     *
+     * Loads are seeded with the static corner weights rather than zeros: a parked
+     * car does carry its own weight, and a dashboard reading zero grip on the
+     * first frame before the kernel has stepped is a lie about the car.
+     */
     out: {
-      fz: [0, 0, 0, 0],
+      fz: [FZ_STATIC[0], FZ_STATIC[1], FZ_STATIC[2], FZ_STATIC[3]],
       fx: [0, 0, 0, 0],
       fy: [0, 0, 0, 0],
       slipRatio: [0, 0, 0, 0],
@@ -365,6 +371,14 @@ export function step(car, input, track, dt) {
     ? mgukTorque(car.ers.soc, MODE_DEPLOY, rpm)
     : 0;
   crankTorque += deployTorque;
+
+  // Engine braking goes through the clutch, and near a standstill the clutch is
+  // out. Without this the car crept backwards forever: at rest the engine still
+  // made -25 N·m of pumping drag, which through a 14.4:1 first gear is -336 N·m at
+  // the rear axle, and the standstill arrest settled at an equilibrium of
+  // -0.16 m/s rather than at zero.
+  const slip = clutchSlip(omegaRear, gear);
+  if (crankTorque < 0) crankTorque *= 1 - slip;
 
   let driveTorque = wheelTorque(crankTorque, gear, car.gearbox.shifting);
   if (throttle < 0 && vLong > -REVERSE_SPEED_LIMIT) {
@@ -565,7 +579,7 @@ export function step(car, input, track, dt) {
   out.mz = mzTotal;
   out.steerTorque = mzTotal;
   out.rpm = rpm;
-  out.clutch = clutchSlip(omegaRear, gear);
+  out.clutch = slip;
   out.downforce = aero.downforce;
   out.drag = aero.drag;
   out.aLong = aLong;
