@@ -1,64 +1,72 @@
-// Gear and engine speed for the dashboard.
-//
-// The simulation has no gearbox — `bicycle.js` puts power straight through the
-// rear axle as `POWER / v`. This module exists purely so the dash can show a gear
-// and a tacho, and it is a pure function of road speed: nothing here feeds back
-// into the physics. Shifting is instantaneous and costs nothing, because there is
-// no drivetrain to model.
+/**
+ * Instrument-facing gearbox readouts.
+ *
+ * This module used to *invent* a gearbox. The simulation had none — power went
+ * straight through the rear axle as `POWER / v` — so the dash needed something to
+ * show, and it derived a gear and a tacho from road speed through a table of
+ * ratios that existed nowhere else. Shifting was instantaneous and cost nothing,
+ * because there was no drivetrain to model.
+ *
+ * There is now. `powertrain.js` owns the ratios, the shift logic and the shift
+ * time, and the kernel reports the gear it is actually in and the rpm the crank is
+ * actually turning. So what is left here is what an instrument genuinely adds:
+ * where the shift lights come on, and what a gear reads as on a display.
+ *
+ * `rpmFor` survives for one caller — an rpm estimate from road speed is still the
+ * right fallback for anything holding a snapshot without a live driveline.
+ */
 
-import { WHEEL_RADIUS } from '../physics/vehicle.js';
+import {
+  GEAR_RATIOS, FINAL_DRIVE, IDLE_RPM, LIMITER_RPM, SHIFT_UP_RPM, SHIFT_DOWN_RPM,
+  totalRatio, TOP_GEAR,
+} from '../physics/powertrain.js';
+import { WHEEL_RADIUS } from '../physics/wheel.js';
 
-/** Engine revolutions per wheel revolution, first to eighth. */
-export const RATIOS = [29.4, 23.2, 18.4, 14.5, 11.5, 9.1, 7.2, 5.7];
-
-export const IDLE_RPM = 4000;
-/** Where the shift light goes blue and the next gear is picked. */
-export const SHIFT_RPM = 14200;
-export const REDLINE_RPM = 15000;
+export { IDLE_RPM, TOP_GEAR } from '../physics/powertrain.js';
+export const REDLINE_RPM = LIMITER_RPM;
+export const SHIFT_RPM = SHIFT_UP_RPM;
+export const DOWNSHIFT_RPM = SHIFT_DOWN_RPM;
 /** First shift light comes on here. */
-export const LIGHTS_FROM_RPM = 11500;
-/** Power-on downshift: hold a taller gear until the engine is this slow. */
-export const DOWNSHIFT_RPM = 8200;
+export const LIGHTS_FROM_RPM = 10500;
 
-const CIRCUMFERENCE = 2 * Math.PI * WHEEL_RADIUS;
+/** Engine revolutions per wheel revolution, first to eighth. From the real box. */
+export const RATIOS = GEAR_RATIOS.map(r => r * FINAL_DRIVE);
+
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 /**
- * Engine speed in a given gear, clamped to the instrument's range.
- * @param {number} speedMs road speed, m/s
- * @param {number} gear 1-based
+ * Engine speed in a given gear from road speed, clamped to the instrument range.
+ *
+ * A geometric estimate, not the truth: the truth is `snapshot.rpm`, which comes
+ * from the driven wheels through the engaged ratio and includes clutch slip and
+ * wheelspin. Two things this cannot know about, and both are visible — a car
+ * spinning its rears reads high, and a car at a standstill in gear reads idle.
  */
 export function rpmFor(speedMs, gear) {
-  const ratio = RATIOS[clamp(gear, 1, RATIOS.length) - 1];
-  const wheelRevsPerSecond = Math.abs(speedMs) / CIRCUMFERENCE;
-  return clamp(wheelRevsPerSecond * ratio * 60, IDLE_RPM, REDLINE_RPM);
+  const ratio = Math.abs(totalRatio(clamp(gear, 1, TOP_GEAR)));
+  const wheelOmega = Math.abs(speedMs) / WHEEL_RADIUS;
+  return clamp(wheelOmega * ratio * 60 / (2 * Math.PI), IDLE_RPM, REDLINE_RPM);
 }
 
-/**
- * Lowest gear that keeps the engine under the shift point — which is what a
- * driver on an upshift-only run would be holding at this speed.
- */
+/** Lowest gear that keeps the engine under the shift point at this road speed. */
 export function gearFor(speedMs) {
   let gear = 1;
-  while (gear < RATIOS.length && rpmFor(speedMs, gear) > SHIFT_RPM) gear++;
+  while (gear < TOP_GEAR && rpmFor(speedMs, gear) > SHIFT_RPM) gear++;
   return gear;
 }
 
 /**
- * Sequential box with hysteresis. `gearFor` always picks the shortest legal
- * ratio, so a lift-off downshift slams the revs back up. This holds the current
- * gear while coasting and only shortens on power once rpm has fallen.
+ * Sequential box with hysteresis, for a caller with only a road speed.
  *
- * @param {number} prev 1-based gear from the last frame
- * @param {number} speedMs
- * @param {{ throttle?: number }} [load]
+ * `gearFor` always picks the shortest legal ratio, so a lift-off downshift slams
+ * the revs back up. This holds the current gear while coasting and only shortens
+ * on power once rpm has fallen.
  */
 export function advanceGear(prev, speedMs, { throttle = 0 } = {}) {
-  const max = RATIOS.length;
   if (Math.abs(speedMs) < 0.35) return 1;
-  let gear = clamp(prev || 1, 1, max);
+  let gear = clamp(prev || 1, 1, TOP_GEAR);
 
-  while (gear < max && rpmFor(speedMs, gear) > SHIFT_RPM) gear++;
+  while (gear < TOP_GEAR && rpmFor(speedMs, gear) > SHIFT_RPM) gear++;
 
   if (throttle > 0.22) {
     while (gear > 1 && rpmFor(speedMs, gear) < DOWNSHIFT_RPM) {

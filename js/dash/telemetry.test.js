@@ -7,7 +7,7 @@ import {
 import {
   createVehicle, launchVehicle, advance, forwardSpeed,
 } from '../physics/vehicle.js';
-import { MU } from '../physics/bicycle.js';
+import { MU } from '../physics/constants.js';
 
 const LAP = 5891;
 const DT = 1 / 60;

@@ -295,3 +295,158 @@ once texture count grows — GPU memory and upload cost, not just download.
 - Zero console warnings or 404s on a clean clone
 - `node --test` green (126 tests at the time of writing)
 - Before/after screenshots at 3 fixed camera poses per phase
+
+---
+
+## Implementation log (2026-08-19)
+
+### Phase 0 — done (this session)
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 0.1 Un-black render | **done** | Asphalt albedo 80–110; track `envMapIntensity` 1.0/0.85; removed `AmbientLight`; hemisphere 0.55; `environmentIntensity` 1.0 |
+| 0.2 Regression guard | **done** | `scripts/visual-regression.mjs` + `scratchpad/cdp.mjs`; `npm run test:visual`; SwiftShader headless WebGL; mean≈184 pass |
+| 0.3 Asset tracking | **done** | `download.sh` fetches HDRI + grass maps; files present locally — **git add still required before commit** |
+| 0.4 Known-bad settings | **done** | `PCFShadowMap` + `shadow.radius=6`; `SSAOPass` → `GTAOPass` (toggle `1`) |
+| 0.5 Frame budget | **pending** | Needs real GPU timing at 1080p/1440p — SwiftShader headless is not representative |
+
+### Phase 1 — partial
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 1.1 Decal UV verify | **skipped** | Plan says no visible distortion; no UV-checker pass run |
+| 1.2 Tyre sidewall | **already present** | Load-based squash on wheel pivots in `Car.js` |
+| 1.3 Specular response | **done** | `specularIntensityMap` on body paint |
+
+### Phases 2–3 — done (this session)
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 2.1 WebGPU spike | **done** | `?renderer=webgpu` + `CSMShadowNode` sun shadows + TSL `GTAONode` via `RenderPipeline` (`js/render/webgpuPipeline.js`) |
+| 3.1 GroundedSkybox | **done** | Replaces flat `scene.background`; radius 2200 m, height 1.6 m; follows camera XZ each frame |
+| 3.2 White-line wear | **done** | `js/render/lineWearMaps.js` — scuffs/rubber pickup on edge lines + start/finish |
+
+### Phases 2.2–4 — not started
+
+TSL post (GTAONode, TRAANode, SSGI, SSR, FSR), instanced grass, trackside props, LUT/sharpen/bloom — deferred.
+
+### Phase 0.5 + 3.3 — done (grass and asphalt pass)
+
+Measured in GPU-backed headless Chrome (ANGLE Metal, Apple M4 Pro, vsync off),
+1280x713. SwiftShader numbers were never representative; these are.
+
+| Path | mean | p95 | p99 | draw calls |
+|------|------|-----|-----|-----------|
+| WebGL (default) | 5.98–6.76 ms (150–167 fps) | 11.5 | 15.4 | 91 |
+| WebGPU (`?renderer=webgpu`) | 2.97 ms (336 fps) | 5.5 | 17.1 | — |
+
+Adding 34 689 grass tufts and the asphalt variation did not move the frame time
+outside run-to-run noise around the 6.46 ms baseline. Part of that is the skybox
+fix below removing a full-screen overdraw layer.
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 0.5 Frame budget | **done** | Above. ~10 ms of headroom at 60 Hz on the WebGL path |
+| 3.3 Grass geometry | **done** | `tuftGeometry.js` (pure) + `grassTufts.js`; 34 689 instances over 96 chunked `InstancedMesh`es so frustum culling submits ~4; 12 tris each; alpha-tested opaque; wind sway in the vertex stage |
+
+Four defects found and fixed, each with a guard test proven to fail beforehand:
+
+1. **`GroundedSkybox` submerged every surface.** Its flat ground disc landed at
+   exactly y=0 while the runoff lawn is at −0.04 and the infield at −0.25, so the
+   HDRI's bottom pole was painted over the entire verge and only the parts of
+   tufts above y=0 showed. `SKYBOX_GROUND_Y = −0.35` drops it clear.
+2. **The sky was fogged.** The dome sits at radius 2200 with `fog.far` 1400, so
+   the fog factor saturated over every pixel: the sky was one flat wash of fog
+   colour. `scene.background` had been immune because backgrounds are not fogged.
+   Distinct sky colours went 198 → 750.
+3. **Tuft density was inverted** — 13.7x more tufts in the far runoff than on the
+   verge, the opposite of the docstring. `(1 - falloff)` should have been
+   `falloff`. Tufts also started 0.35 m out, growing through the 1.0 m kerb.
+4. **Half of every tuft was a solid slab.** The crossed quad derived U from world
+   `x`, which is 0 at every vertex of the off-axis plane, so it sampled one texel
+   column of the blade's opaque centre and stretched it across the card.
+
+Two silent traps worth remembering, both caught only by measuring:
+
+- **CSM owns `onBeforeCompile`.** It calls `setupMaterial` on every standard
+  material and HelloRacer rescans for late arrivals, so a direct assignment is
+  overwritten with no error — the grass wind never ran while `uTime` ticked into
+  an unread uniform. `composeOnBeforeCompile.js` composes both; assigning after
+  CSM instead would break shadows, since CSM stashes the shader per material.
+- **Alpha-cutout textures need colour in their transparent texels.** RGB left at
+  0 where alpha is 0 is invisible in the texture and ruinous once minified: the
+  mip chain averages blade colour with black and the tufts become charcoal.
+
+Asphalt gained the lap-scale structure a 4 m tile cannot carry: rubbered-in
+racing line (12.9% darker than the edges, measured), dusty marbles off it,
+resurfacing patches, paving seams, and per-stone aggregate colour. The profile is
+pure and unit-tested in `asphaltSurface.js`; the shader only samples a map
+addressed by position on the track (`aSurfaceUv` from `_ribbon`), so no formula
+is duplicated in GLSL.
+
+**WebGL only:** both the asphalt variation and the grass wind use
+`onBeforeCompile`, which NodeMaterial does not run. Under `?renderer=webgpu` the
+asphalt lateral spread drops from 46.8 to 13.3 (aggregate noise only) and the
+tufts stand still. `rendererBackend.js` warns about this at boot. Porting means
+rebuilding both profiles as TSL node graphs.
+
+### WebGPU parity + trackside LOD
+
+Both shader effects now run on the WebGPU path as TSL node graphs
+(`js/render/tslSurfaceNodes.js`, reached only by dynamic import so the WebGL
+build never pulls in `three/tsl`). Measured on the same overhead pose:
+
+| | WebGL (GLSL) | WebGPU (TSL) | before the port |
+|---|---|---|---|
+| asphalt lateral spread | 48.3 | 48.5 | 13.3 |
+| racing line vs edges | 13.6% darker | 13.7% darker | 0.3% (absent) |
+| grass sway, pixels moving | 4.56% | 3.28% | 0.00% (static) |
+| control, sway disabled | 0.00% | 0.00% | — |
+
+Three traps, all of which looked completely correct from JavaScript:
+
+1. **`materialColor` is a vec4.** `dot( materialColor.mul( … ), vec3( … ) )` folded
+   alpha into the luminance and returned ~1.7x the true value, rendering the
+   racing line 19% *brighter* than the track edges. `luminance()` has the same
+   problem on a vec4; take `.rgb` first. Isolated by adding one term at a time:
+   albedo alone gave 14.8% darker, and only the luminance term inverted it.
+2. **That term was a no-op to begin with.** Asphalt albedo is already
+   near-neutral, so desaturating toward its own luminance measured byte-identical
+   to omitting it — on the WebGL path too. Replaced on both paths with a
+   cool-shift where rubber is heavy, which is what was actually wanted and does
+   show: 15.5% vs 14.8%.
+3. **`onBeforeRender` is never called on the WebGPU path.** The wind clock sat at
+   exactly 0 forever while the uniform existed and the callback was installed.
+   The TSL path uses the renderer's own `time` node; `grassTufts` leaves it alone.
+
+`_setupWebGpuPipeline()` is now wrapped: a throw inside post-processing used to
+propagate out of `init()` before the track and car were built, so one bad node
+produced an entirely empty world. `render()` already fell back to
+`renderer.render()`, so degrading is safe.
+
+**Trackside LOD rewritten** (`lodBands.js` for the arithmetic, `tracksideLOD.js`
+for the wiring). The first version wrapped each of grass, fence and props in a
+single `THREE.LOD`, which measures distance from its own origin — parked at the
+world origin, 1011 m from a circuit that sits a kilometre out, against a 420 m
+cut-off. Every band read "too far", so grass, catch fence and props were never
+drawn anywhere on the lap. Two rules now:
+
+- Distance is to the **nearest point** of the bounding sphere. Everything out
+  there is instanced across the whole lap — `catchFencePanels` is one mesh 5.9 km
+  long — so a centre-based metric is meaningless. Lap-spanning meshes report ~0
+  and stay at full detail, which is correct: they are one draw call each, and
+  thinning them would delete panels beside the car. Chunking them the way the
+  grass is chunked is the prerequisite for giving them real LOD.
+- Detail falls off by **instance count**, not by dropping objects, and each of the
+  96 grass chunks is judged on its own distance: 362/362 at the kerb, 181 at
+  100 m, 91 at 300 m, 0 past 420 m. 102 units, 25 drawing. Chunk instance order is
+  deterministically interleaved so a thinned prefix still covers the whole chunk
+  instead of leaving the far half bald.
+
+Final frame time with all of it visible: WebGL 6.79 ms (147 fps, 111 draw calls,
+p95 12.2, p99 17.8); WebGPU 3.37 ms (297 fps). The 6.46 ms pre-grass baseline is
+0.33 ms away.
+
+### Tests
+
+179 unit tests passing (`node --test`). Visual guard: `npm run test:visual` (mean≈184).

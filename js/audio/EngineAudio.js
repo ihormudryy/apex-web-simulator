@@ -160,12 +160,19 @@ export class EngineAudio {
     this._lastT = t;
 
     const prevGear = this._gear;
-    this._gear = advanceGear(this._gear, snap.speedMs, { throttle: snap.throttle });
+    // The real gear, from the driveline. Deriving it from road speed here meant
+    // the engine note was a function of how fast the scenery was moving — it could
+    // not hear a shift, a clutch slip, or the rears spinning up.
+    this._gear = typeof snap.gear === 'number'
+      ? snap.gear
+      : advanceGear(this._gear, snap.speedMs, { throttle: snap.throttle });
     if (this._gear !== prevGear) this._beginShift(t, this._gear > prevGear);
 
     // A shift is a mechanical event: the revs must move in tens of milliseconds,
     // not glide. Outside the shift window, pulls and coasts use gentler rates.
-    const targetRpm = rpmFor(snap.speedMs, this._gear);
+    const targetRpm = Number.isFinite(snap.rpm)
+      ? snap.rpm
+      : rpmFor(snap.speedMs, this._gear);
     const shifting = t < this._shiftUntil;
     const rate = shifting ? SLEW_SHIFT_RPM_S
       : (targetRpm > this._rpm ? SLEW_UP_RPM_S : SLEW_DOWN_RPM_S);

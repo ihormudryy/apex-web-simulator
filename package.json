@@ -6,6 +6,10 @@
   "description": "Silverstone GP F1 racer on Three.js \u2014 no build step, ES modules straight from an importmap.",
   "scripts": {
     "test": "node --test",
-    "serve": "python3 server.py"
+    "test:visual": "node scripts/visual-regression.mjs",
+    "serve": "python3 server.py",
+    "assets": "bash download.sh",
+    "validate": "node scripts/validate-physics.mjs",
+    "validate:visual": "node scripts/validate-visual.mjs"
   }
 }

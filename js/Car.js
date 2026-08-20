@@ -1,19 +1,20 @@
 import * as THREE from 'three';
 import { BinLoader } from './BinLoader.js';
 import {
-  createVehicle, setPose, advance, updateSteering, renderPose,
-  speed, forwardSpeed, lateralSpeed, travelYaw,
+  createVehicle, setPose, advance, updateSteering, renderPose, resetVehicle,
+  telemetryOf, speed, forwardSpeed, lateralSpeed, travelYaw,
 } from './physics/vehicle.js';
 import {
   normalFromHeight, roughnessFromNoise, metallicFromNoise, specularIntensityFromNoise,
   carbonWeaveNormal, tyreMicroNormalAndRoughness,
 } from './render/carProceduralMaps.js';
-import {
-  MASS, G, WB, LR, LF, RHO, CLA, H_CG,
-} from './physics/bicycle.js';
+import { MASS, G, WB, LR, LF } from './physics/constants.js';
 import { cockpitSteerAngle, followSteerAngle } from './render/cockpitSteer.js';
 
 const DEG90 = Math.PI / 2;
+/** Surface temperatures the tyre shading is authored between, °C. */
+const T_TYRE_COLD = 60;
+const T_TYRE_HOT = 130;
 const STEER_HUB = { x: 0, y: 0.5933, z: 0.5054 };
 
 export class Car {
@@ -90,20 +91,11 @@ export class Car {
     this.input.right = false;
     this.input.brake = false;
     setPose(this.vehicle, x, z, yaw);
-    const v = this.vehicle;
-    v.vx = 0;
-    v.vz = 0;
-    v.av = 0;
-    v.axPrev = 0;
-    v.ayPrev = 0;
-    v.omega = [0, 0, 0, 0];
-    v.steerAngle = 0;
-    v.steerSmooth = 0;
-    v.braking = false;
-    v.wheelSpin = 0;
-    v.x = x;
-    v.z = z;
-    v.yaw = yaw;
+    // `resetVehicle` rather than clearing the fields by hand: those are mirrored
+    // out of the kernel's flat state vector once a frame, so zeroing them here
+    // would be overwritten on the next step and the car would drive off with the
+    // velocity it was supposed to have lost.
+    resetVehicle(this.vehicle);
     this.root.position.set(x, this.root.position.y, z);
     this.root.rotation.y = yaw;
     this._braking = false;
@@ -436,18 +428,18 @@ export class Car {
       w._spinPivot.rotation.z -= v.wheelSpin;
     }
 
-    // Tyre micro “life”: heat/wear roughness + a subtle squash based on axle
-    // normal load (same longitudinal load-transfer model as the bicycle physics).
+    // Tyre micro “life”: heat and wear roughness, and a squash from the real
+    // corner load. Both used to be modelled here separately from the physics —
+    // the load re-derived from a lumped ClA and a longitudinal transfer term, and
+    // the heat guessed from which keys were held. The kernel now knows both, so
+    // this reads them instead of inventing them.
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     if (this._tyreMatFront && this._tyreMatRear) {
-      const speedMps = Math.hypot(v.vx, v.vz);
-      const q = 0.5 * RHO * speedMps * speedMps;
-      const FL = q * CLA;
-
+      const sim = telemetryOf(v);
       const baseFzF = MASS * G * LR / WB;
       const baseFzR = MASS * G * LF / WB;
-      const FzF = Math.max(200, MASS * G * LR / WB + 0.4 * FL - MASS * v.axPrev * H_CG / WB);
-      const FzR = Math.max(200, MASS * G * LF / WB + 0.6 * FL + MASS * v.axPrev * H_CG / WB);
+      const FzF = sim.fz[0] + sim.fz[1];
+      const FzR = sim.fz[2] + sim.fz[3];
 
       const defF = clamp((FzF - baseFzF) / baseFzF, -0.3, 0.8);
       const defR = clamp((FzR - baseFzR) / baseFzR, -0.3, 0.8);
@@ -464,17 +456,13 @@ export class Car {
       setTyreSquash(this._tyreMeshesFront, defF);
       setTyreSquash(this._tyreMeshesRear, defR);
 
-      // Heat target: braking and sideslip create more surface temperature.
-      const lat = Math.abs(lateralSpeed(v));
-      const brakingHeat = v.braking ? 1 : 0;
-      const throttleHeat = this.input.forward ? 0.6 : 0;
-      const slipHeat = clamp(lat / 35, 0, 1);
-      const targetHeatF = clamp(brakingHeat * 0.9 + throttleHeat * 0.25 + slipHeat * 0.35, 0, 1);
-      const targetHeatR = clamp(brakingHeat * 0.95 + throttleHeat * 0.35 + slipHeat * 0.30, 0, 1);
-
-      const k = 1 - Math.exp(-dt * 2.2);
-      this._tyreTempFront += (targetHeatF - this._tyreTempFront) * k;
-      this._tyreTempRear += (targetHeatR - this._tyreTempRear) * k;
+      // Heat from the tyre model's own surface temperature, normalised across the
+      // band the material shading is authored for. The tyre already has its own
+      // thermal time constant, so this needs no smoothing of its own — smoothing
+      // it twice was what made the visual lag the physics by half a second.
+      const heatOf = t => clamp((t - T_TYRE_COLD) / (T_TYRE_HOT - T_TYRE_COLD), 0, 1);
+      this._tyreTempFront = heatOf(0.5 * (sim.tyreT[0] + sim.tyreT[1]));
+      this._tyreTempRear = heatOf(0.5 * (sim.tyreT[2] + sim.tyreT[3]));
 
       const updateTyreMat = (mat, temp) => {
         const base = mat.userData.baseRoughness ?? mat.roughness;

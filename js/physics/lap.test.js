@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import {
   createVehicle, setPose, advance, updateSteering, forwardSpeed, lateralSpeed,
 } from './vehicle.js';
-import { WB } from './bicycle.js';
+import { WB } from './constants.js';
 import { buildCenterline } from '../track/centerline.js';
 import { SILVERSTONE_WAYPOINTS } from '../track/silverstoneWaypoints.js';
 

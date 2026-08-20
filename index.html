@@ -9,14 +9,25 @@
 	</head>
 	<body>
 		<div id="container"></div>
-		<script type="importmap">
-		{
-			"imports": {
-				"three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
-				"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"
-			}
-		}
+		<script type="module">
+		// WebGPURenderer must share the same `three` build as every Texture and
+		// Material. The WebGL path keeps three.module.js (CSM/EffectComposer need
+		// ShaderChunk); `?renderer=webgpu` swaps the import map before boot.
+		const CDN = 'https://cdn.jsdelivr.net/npm/three@0.185.1';
+		const webgpu = new URLSearchParams(location.search).get('renderer') === 'webgpu';
+		const importmap = {
+			imports: {
+				three: `${CDN}/build/${webgpu ? 'three.webgpu.js' : 'three.module.js'}`,
+				'three/webgpu': `${CDN}/build/three.webgpu.js`,
+				'three/tsl': `${CDN}/build/three.tsl.js`,
+				'three/addons/': `${CDN}/examples/jsm/`,
+			},
+		};
+		const el = document.createElement('script');
+		el.type = 'importmap';
+		el.textContent = JSON.stringify(importmap);
+		document.head.appendChild(el);
+		await import('./js/HelloRacer.js');
 		</script>
-		<script type="module" src="js/HelloRacer.js"></script>
 	</body>
 </html>

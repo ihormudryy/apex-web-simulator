@@ -5,7 +5,7 @@ import {
   createVehicle, advance, updateSteering, resolvePedals,
   forwardSpeed, lateralSpeed, travelYaw, speed, REVERSE_THRESHOLD, renderPose,
 } from './vehicle.js';
-import { WB } from './bicycle.js';
+import { WB } from './constants.js';
 import { MAX_CATCHUP, DT as SIM_DT } from './fixedStep.js';
 import * as SIM from './state.js';
 

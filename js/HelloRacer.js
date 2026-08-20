@@ -14,7 +14,7 @@ import { outdoorSkyData, DEFAULT_SUN_U, DEFAULT_SUN_V } from './render/outdoorSk
 import { createRendererBackend } from './render/rendererBackend.js';
 import { setSunLightDirection } from './render/sunLightDirection.js';
 import { EngineAudio } from './audio/EngineAudio.js';
-import { setPose } from './physics/vehicle.js';
+import { setPose, resetVehicle } from './physics/vehicle.js';
 import { GroundedSkybox } from 'three/addons/objects/GroundedSkybox.js';
 
 const SKY_COLOR = 0xa8d6ff;
@@ -471,20 +471,13 @@ class HelloRacer {
     }, { passive: true });
   }
 
+  /**
+   * The kernel's flat state vector is authoritative, and `v.vx` and friends are
+   * copies made once a frame. Clearing the copies by hand left the real state
+   * untouched, so a reset car drove off with the velocity it had before.
+   */
   _zeroVehicle(v) {
-    v.vx = 0;
-    v.vz = 0;
-    v.av = 0;
-    v.axPrev = 0;
-    v.ayPrev = 0;
-    v.omega = [0, 0, 0, 0];
-    v.steerAngle = 0;
-    v.steerSmooth = 0;
-    v.braking = false;
-    v.wheelSpin = 0;
-    v.x = v.spawn.x;
-    v.z = v.spawn.z;
-    v.yaw = v.spawn.yaw;
+    resetVehicle(v);
   }
 
   _placeCarOnTrack() {

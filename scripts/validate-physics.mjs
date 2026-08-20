@@ -38,10 +38,7 @@ const padL = (s, n) => String(s).padStart(n);
 const rule = n => `${C.dim}${'-'.repeat(n)}${C.off_}`;
 
 async function main() {
-  // Prefer the four-wheel kernel; fall back to the planar one so this script still
-  // reports something useful on a checkout from before the rebuild.
-  const kernel = await tryImport('../js/physics/kernel.js')
-    ?? await tryImport('../js/physics/bicycle.js');
+  const kernel = await tryImport('../js/physics/kernel.js');
   if (!kernel?.step) {
     console.error(`${C.error}Cannot load a physics kernel${C.off_}`);
     process.exit(1);
