@@ -147,6 +147,16 @@ class HelloRacer {
        * work rather than a mystery. It is left off until it earns its place.
        */
       taa: false,
+      /**
+       * The grading curve, last in the chain. Toggle with `G`.
+       *
+       * It has a measured job rather than a look: with everything else green the
+       * rendering dashboard reports 5.0% of pixels at or below 5/255 against a 2%
+       * target, which is a twentieth of the frame carrying no information at all.
+       * Lifting the toe of the curve fixes that and leaves the midtones, the mean
+       * luminance and the saturation where they already measured correctly.
+       */
+      grade: true,
     };
 
     this._lastTime = 0;
@@ -380,6 +390,7 @@ class HelloRacer {
     const { OutputPass } = await import('three/addons/postprocessing/OutputPass.js');
     const { Pass, FullScreenQuad } = await import('three/addons/postprocessing/Pass.js');
     const { createTaaPass } = await import('./render/taaPass.js');
+    const { createGradingPass } = await import('./render/gradingPass.js');
 
     this._csm = new CSM({
       camera: this.camera,
@@ -446,6 +457,29 @@ class HelloRacer {
     this._composer.addPass(this._taaPass);
 
     this._composer.addPass(new OutputPass());
+
+    /**
+     * No bloom. `UnrealBloomPass` could not be made to composite correctly here,
+     * in either position, and the tell is that **it fails at strength zero** —
+     * which rules out the bloom amount and the luminosity threshold together.
+     *
+     * Ahead of OutputPass, in linear HDR where it belongs, the frame came out at a
+     * mean luminance of 254 of 255 for every threshold from 0.86 to 12. Moved
+     * after OutputPass, where the input is the display-referred 0..1 its threshold
+     * assumes, it lifts mean luminance from 124 to 178 — still at strength zero.
+     * It is not blooming too hard; it is not compositing.
+     *
+     * Grading is the part of this the plan actually asked for a result from, and
+     * it has a measured job: the rendering dashboard's crushed-shadow metric. That
+     * works. Bloom is cosmetic, and shipping a pass that brightens the whole frame
+     * by a third whatever it is set to is worse than not having it.
+     */
+
+    // Grading last: it is a display-referred curve, and the dashboard's
+    // crushed-shadow metric is measured on display values.
+    this._gradingPass = createGradingPass(Pass, FullScreenQuad);
+    this._gradingPass.enabled = this._fx.grade;
+    this._composer.addPass(this._gradingPass);
   }
 
   async _setupWebGpuPipeline() {
@@ -661,7 +695,8 @@ class HelloRacer {
     if (this._fx.ssao && this._webgpuPost?.renderPipeline) {
       this._setWebGpuAoEnabled(true);
       this._webgpuPost.renderPipeline.render();
-    } else if (this._composer && (this._fx.ssao || this._fx.taa)) {
+    } else if (this._composer
+      && (this._fx.ssao || this._fx.taa || this._fx.grade)) {
       this._composer.render(dt);
     } else {
       this.renderer.render(this.scene, this.camera);
@@ -894,6 +929,13 @@ class HelloRacer {
   _onKeyDown(e) {
     if (e.code === 'KeyH') {
       if (!e.repeat) this.dashboard.toggle();
+      return;
+    }
+    if (e.code === 'KeyG') {
+      if (!e.repeat) {
+        this._fx.grade = !this._fx.grade;
+        if (this._gradingPass) this._gradingPass.enabled = this._fx.grade;
+      }
       return;
     }
     if (e.code === 'KeyT') {

@@ -251,7 +251,12 @@ export class Car {
       clearcoatRoughness: 0.18,
       clearcoatNormalMap: carbonNormalTex,
       clearcoatNormalScale: new THREE.Vector2(0.3, 0.3),
-      anisotropy: 0.2,
+      // Carbon weave is anisotropic *along the weave*, and the direction matters
+      // as much as the strength: an anisotropic highlight with no rotation
+      // stretches along the model's UV axis, which on a curved panel is nowhere in
+      // particular. The 2x2 twill on these parts runs at 45 degrees.
+      anisotropy: 0.45,
+      anisotropyRotation: Math.PI / 4,
       reflectivity: 0.35,
     });
 
@@ -311,7 +316,11 @@ export class Car {
 
     const bodyParts = {
       BodyPaint:     { x:0,       y:0.5859,  z:0,       mat: this.bodyPaintMat },
-      Suspension:    { x:0,       y:0.4044,  z:-0.3071, mat: new THREE.MeshStandardMaterial({ color:0x333333, envMap, roughness:0.7, metalness:0.4 }) },
+      // Suspension links: machined titanium and steel inside carbon fairings, so
+      // fully metallic and fairly sharp. `metalness: 0.4` was neither — a
+      // half-metal reads as painted plastic, and these are the parts a low camera
+      // sees against the sky where a wrong specular is most obvious.
+      Suspension:    { x:0,       y:0.4044,  z:-0.3071, mat: new THREE.MeshPhysicalMaterial({ color:0x5a5d60, envMap, envMapIntensity:0.55, roughness:0.34, metalness:1.0, anisotropy:0.5, anisotropyRotation:Math.PI / 2 }) },
       InsideBlack:   { x:0,       y:0.5773,  z:0.729,   mat: blackMat },
       GlossyBlack:   { x:0,       y:0.4115,  z:-0.7112, mat: carbonMat },
       Chrome:        { x:0,       y:0.5867,  z:0.3202,  mat: new THREE.MeshStandardMaterial({ color:0xcccccc, envMap, envMapIntensity:0.35, roughness:0.22, metalness:0.9 }) },
