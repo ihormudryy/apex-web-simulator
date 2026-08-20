@@ -250,6 +250,18 @@ async function main() {
     // resolved one next to it is what the player actually sees.
     const raw = await capturePair(false);
     const m = await capturePair(true);
+    // Same guard as validate-aa: a frame with no contrast at all is a page that
+    // did not render, not a perfectly flat image, and reporting metrics from it is
+    // worse than reporting nothing.
+    if (m.contrast < 5) {
+      console.error(
+        '\n  The captured frame has essentially no contrast, so the page did not'
+        + '\n  render. Check that nothing else is serving on port 8000.\n',
+      );
+      cdp.close();
+      process.exitCode = 1;
+      return;
+    }
     const a = { width: m.width, height: m.height };
     await evaluate(cdp, `(() => {
       if (window.racer._taaPass) window.racer._taaPass.measureOffset = { x: 0, y: 0 };

@@ -180,6 +180,21 @@ async function main() {
     }
     cdp.close();
 
+    // A zero RMS everywhere is not a perfect frame, it is a broken measurement —
+    // two of these harnesses spawning a server on the same port will collide, and
+    // the page then never renders. Reporting "best" for every candidate is a
+    // silent false pass, which is the whole failure class this script exists to
+    // catch, so it fails loudly instead.
+    if (results.every(([, v]) => v < 1e-6)) {
+      console.error(
+        '\n  Every candidate measured identical to the reference, which cannot happen.'
+        + '\n  The page almost certainly did not render — check that nothing else is'
+        + '\n  already serving on port 8000, and run this on its own.\n',
+      );
+      process.exitCode = 1;
+      return;
+    }
+
     const best = Math.min(...results.map(r => r[1]));
     console.log(`\n  Antialiasing against ${SUPERSAMPLE}x supersampled ground truth`);
     console.log(`  ${C.dim}${'-'.repeat(52)}${C.end}`);
