@@ -493,3 +493,163 @@ motion; grading last.
 **Phase 4 — feel and tools.** Setup screen (wings, ARB, springs, ride height,
 brake bias, differential, tyre pressures, fuel), telemetry overlay, delta and
 ghost, slip-keyed audio.
+
+---
+
+## 15. Measured after implementation
+
+§12 and §13 record the baseline *before* this work. They are kept as they were —
+the shape of a failure is worth more than its numbers — and this is what the car
+does now.
+
+### Reference figures — 12/12 within tolerance
+
+`npm run validate`
+
+| quantity | §12 baseline | now | target |
+|---|---|---|---|
+| 0–100 km/h | 2.78 s | 2.35 s | 2.6 |
+| 0–200 km/h | 5.10 s | 4.59 s | 4.8 |
+| 0–300 km/h | 12.14 s | 11.21 s | 9.0 |
+| top speed | 311 km/h | 306 km/h | 330 |
+| 100–0 / 200–0 / 300–0 | 21.5 / 65.5 / 111 m | 20.6 / 61.5 / 110 m | 17 / 65 / 125 |
+| peak lateral @100 / 200 / 290 | 2.06 / 2.60 / 3.77 g | 2.04 / 2.77 / 3.71 g | 2.2 / 3.8 / 5.2 |
+| downforce @200 / @300 | 886 / 1994 kg | 829 / 1951 kg | 1000 / 2000 |
+
+Capability coverage 6/20 → **27/27**, and the checklist now includes the two
+things it could not check before: that the flat state vector exists, and that
+porpoising emerges.
+
+### The §12 diagnosis is resolved
+
+"The car reaches ~70% of its own grip and then departs" — a bifurcation rather
+than a limit — is gone. The car is directionally stable at every sideslip angle
+and *progressively* so: the restoring moment grows from 0.10 rad/s² at 1° to
+1.53 at 30°, so a slide is catchable rather than terminal.
+
+All three named causes were real and are fixed. A fourth was not in the plan and
+was the largest of them:
+
+**The rear tyres have to be wider.** Directional stability needs
+`C_rear·LR > C_front·LF`, and with the CoG at 0.54·WB that is a 17% requirement.
+With one tyre at all four corners the rear's only advantage is its 8% larger
+share of the load, worth 7% after load sensitivity — so 1.07 against 1.174, and
+the car turned *away* from its own velocity vector at every sideslip angle from
+1° to 20°. The real car has 305 mm fronts and 405 mm rears.
+
+Two more that only measurement would have found:
+
+- **Reflected driveline inertia.** Through a 14.4:1 first gear the engine
+  contributes 16.6 kg·m² at the wheels against the wheel's own 1.5. Without it,
+  full throttle from rest spun the rears to a slip ratio of 18 and the car
+  crawled away at 5 km/h after thirty seconds.
+- **The measurements themselves were wrong.** The skid-pad sweep judged
+  "settled" from two yaw samples 0.75 s apart and aborted at 2° of a 13.8° lock,
+  reporting 0.79 g on a car that sustains 2.06; and its bang-bang speed
+  controller was kicking the rear axle 120 times a second, producing 0.3 rad/s of
+  ripple indistinguishable from a car that never settles.
+
+### Porpoising needs the aerodynamic lag
+
+§3.2 calls porpoising the acid test and it is, but the ride-height curve alone
+does not produce it. With downforce responding instantaneously, the curve's
+negative aero stiffness has only two outcomes: if it exceeds the suspension rate
+the car slams onto the plank and stays, and if it does not, the car settles
+quietly. Neither is a limit cycle.
+
+What oscillates is the **lag**. The floor is ~3 m long, so at 320 km/h the flow
+field needs ~35 ms to re-establish, and separation is about three times faster
+than reattachment. A symmetric lag stores and returns energy; the asymmetric one
+pumps it. With it, porpoising appears where it should and nowhere else: quiet to
+250 km/h, 0.2 mm at 280, 6.4 mm at 300, 18.6 mm at 320, all at 5.5–6.8 Hz.
+
+### Rendering — and a metric that could be gamed
+
+`npm run validate:visual` — 6/8 within target, from 5/8.
+
+| metric | §13 after | now | target |
+|---|---|---|---|
+| sub-pixel instability | 3.79 | **2.98** | ≤ 4 |
+| worst-case edge crawl (p99) | 48.3 | **32.3** | ≤ 32 |
+| high-frequency detail | 9.28% | **6.26%** | ≤ 6% |
+| crushed shadows | 4.95% | **0.00%** | ≤ 2% |
+| clipped highlights | 0.4% | **0.00%** | ≤ 1.5% |
+
+The p99 edge crawl §13 recorded as stuck at 48 and unexplained is now 32.3, and
+the fix was not the one anyone would have guessed: routing the frame through the
+composer's 4× MSAA instead of the canvas AA, as a side effect of adding the
+grading pass.
+
+**§8's first item does not ship.** TAA was built — a real depth-reprojection
+pass, since three's own passes accumulate only while the camera is still — and by
+the dashboard it was a triumph: instability 3.80 → 1.60, edge crawl 46 → 19,
+detail 9.1% → 2.4%, every target green.
+
+It was mostly blur. Instability measures how much a frame changes when the
+sampling grid moves half a pixel, and a *blurred* frame barely changes either, so
+the metric rewards blur and cannot tell the two apart. That is a flaw in the
+instrument rather than in the plan, and it deserved a better one:
+`npm run validate:aa` renders the same frame at 3×, box-downsamples it, and calls
+that the truth. Neither failure mode can hide there — an aliased image is far
+from a clean reference and so is a blurred one. Against it, TAA is 143% further
+from the truth than MSAA alone, so it ships behind a key and off.
+
+What is wrong is narrow: a jittered frame starts ~0.35 px from the truth and the
+history recovers almost none of that, because bilinear history sampling and a
+min/max neighbourhood clip both fight convergence. Catmull-Rom sampling and a
+variance-based clip are the known fixes.
+
+**Bloom does not ship either.** `UnrealBloomPass` could not be made to composite
+correctly in this pipeline in either position, and the tell is that it fails at
+strength zero — which rules out the amount and the threshold together. Before
+tone mapping it whites the frame out (mean luminance 254 of 255 at every
+threshold from 0.86 to 12); after it, it still lifts mean luminance from 124 to
+178. Shipping a pass that brightens the whole frame by a third whatever it is set
+to is worse than not having it.
+
+### The track, and where ground height goes
+
+The obvious design for feeding the suspension is a plane fit through the four
+contact points, on the theory that a hill should not compress a spring. It works
+for a uniform slope, and it silently deletes kerbs: two wheels on a 50 mm kerb
+across a 1.6 m track *is* a 3% lateral gradient, and the fit cannot tell it from
+banking. The same blindness applies longitudinally — four points at two distinct
+`x` values fit a plane exactly, so a crest between the axles vanishes too.
+
+The suspension does not need the help. Heave, pitch and roll are free DOFs with
+no absolute-attitude restoring term, so given raw wheel heights it settles onto
+any plane by itself and the springs return to static, while a kerb, a crest and a
+compression all arrive as the transients they are. Cresting a rise unloads the
+car because the wheels have to stop rising and that force comes out of the
+spring; nothing is added to make it happen. The plane fit survives for what it is
+genuinely needed for: gravity along the road, and where to draw the car.
+
+### Performance
+
+The whole frame is **1.2 ms of a 16.7 ms budget** — physics 0.33 ms for ten
+600 Hz sim steps of four tyres, a seven-DOF implicit solve and the full aero;
+render 0.79 ms; CSM, trackside LOD and telemetry 0.07 ms between them. §10's
+worry about JS numeric throughput at 1 kHz × 4 wheels does not arise, and the
+WASM contingency is not needed.
+
+### What the plan did not ask for, and why it is here
+
+- `npm run validate:aa` — antialiasing against supersampled ground truth. The
+  existing dashboard's headline metric can be satisfied by blurring, which it
+  duly was.
+- Per-axle tyre parameters — see above; the car is not stable without them.
+- A driver model (`driver.js`). "0–100 in 2.6 s (traction limited)" describes a
+  modulated launch; pinned, the same car takes 4.6 s spinning its way there. And
+  full brake pedal applies 4 kN·m to a front wheel that locks at 1.9, so a
+  keyboard's digital brake locks all four. It is an input aid, not physics — the
+  kernel behaves identically without it.
+- Aerodynamic lag, without which porpoising does not exist.
+
+### Still open
+
+- 0–300 km/h at 11.2 s against a 9.0 s target, and peak lateral at 200 and
+  290 km/h about 28% shy. Both are inside the plan's tolerances and both are the
+  same shortfall: the car does not convert its downforce into as much grip as the
+  reference figures assume at the top of the speed range.
+- TAA, per above.
+- The WebGPU/TSL path has not been re-verified against any of this.
