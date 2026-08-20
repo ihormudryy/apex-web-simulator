@@ -18,9 +18,11 @@ import { MU, LF, LR, TRACK_HALF } from './constants.js';
  * Wheel positions in body coordinates: x forward, y right.
  *
  * The mesh's wheels sit at ±0.69 m from the centreline while the physics track
- * half-width is 0.8 m. The physics figure is the one that matters here — it sets
- * the roll moment arm — and a 110 mm visual difference on the wheel centre is not
- * something anyone will see.
+ * half-width is 0.8 m. The physics figure is the one that matters here — it
+ * sets the roll moment arm and the yaw lever arms. The renderer draws the
+ * wheels at the authored ±0.69 instead (wheelVisual's AUTHORED_TRACK_HALF) and
+ * nudges the effect emit points to match, because 110 mm of daylight between a
+ * wheel and its wishbones very much IS something people see.
  */
 export const WHEEL_X = [LF, LF, -LR, -LR];
 export const WHEEL_Y = [-TRACK_HALF, TRACK_HALF, -TRACK_HALF, TRACK_HALF];

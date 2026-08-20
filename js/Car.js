@@ -20,8 +20,9 @@ import {
 import { enableCarParticleSystems } from './render/carParticleBackend.js';
 import {
   hubBaseY, chassisAttitudeRotation, wheelRootPosition, suspensionHubOffset,
-  MESH_FORWARD_OFFSET,
+  MESH_FORWARD_OFFSET, AUTHORED_TRACK_HALF,
 } from './render/wheelVisual.js';
+import { WHEEL_Y } from './physics/surface.js';
 
 const DEG90 = Math.PI / 2;
 const clampUnit = v => Math.max(-1, Math.min(1, v));
@@ -535,24 +536,32 @@ export class Car {
   /**
    * Emit and advance the physics-driven effects.
    *
-   * Wheel positions come from the kernel's own surface samples, which are already
-   * the world positions it queried the track at — so the smoke leaves the contact
-   * patch the tyre model was actually using rather than a place the renderer
-   * guessed at.
+   * Wheel positions start from the kernel's own surface samples — the world
+   * positions the tyre model actually used — then get nudged from the physics
+   * half-track onto the authored track the wheels are drawn at, so the smoke
+   * and the marks leave the tyre the viewer can see.
    */
   _updateEffects(v, sim, pose, track, dt) {
     const st = this._fxState;
     const samples = v.car.surfaces;
+    const sinY = Math.sin(pose.yaw);
+    const cosY = Math.cos(pose.yaw);
+    // Right unit vector, for the lateral nudge onto the drawn tyres.
+    const rightX = cosY;
+    const rightZ = -sinY;
     for (let i = 0; i < 4; i++) {
       const s = samples[i];
-      st.wheels[i].x = s.x;
+      const dLat = Math.sign(WHEEL_Y[i]) * AUTHORED_TRACK_HALF - WHEEL_Y[i];
+      const ex = s.x + rightX * dLat;
+      const ez = s.z + rightZ * dLat;
+      st.wheels[i].x = ex;
       st.wheels[i].y = s.height;
-      st.wheels[i].z = s.z;
+      st.wheels[i].z = ez;
       // Track-space position per wheel, so four wheels lay four lines. The car is
       // 1.6 m wide on a 12 m surface, and a racing line is exactly the difference
       // between one mark and four.
       if (track?.query) {
-        const q = track.query(s.x, s.z);
+        const q = track.query(ex, ez);
         st.wheelTrack[i].t = q.t;
         // Normalised to the ASPHALT half-width, because that is what the
         // asphalt's own `aSurfaceUv.y` spans — v = 1 at lateral = +halfWidth.
@@ -563,8 +572,6 @@ export class Car {
           : 0;
       }
     }
-    const sinY = Math.sin(pose.yaw);
-    const cosY = Math.cos(pose.yaw);
     st.sim = sim;
     st.x = pose.x;
     st.z = pose.z;

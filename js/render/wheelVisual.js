@@ -18,9 +18,10 @@ export const IS_FRONT = [true, true, false, false];
 
 /**
  * Distance from the ground contact to the wheel object origin, m.
- * Slightly above the physics radius to match the authored tyre mesh.
+ * The authored Tyre.bin geometry has radius exactly 0.334 — the same as the
+ * physics radius — so anything larger floats the tyres above the deck.
  */
-export const TYRE_CONTACT_RADIUS = 0.340;
+export const TYRE_CONTACT_RADIUS = WHEEL_RADIUS;
 
 /**
  * Where the authored mesh expects the wheel hubs, metres forward of the mesh
@@ -28,6 +29,15 @@ export const TYRE_CONTACT_RADIUS = 0.340;
  * objects at x = 1.3928/1.4 (front) and x = -2 (rear) around this same mesh.
  */
 export const AUTHORED_HUB_FORWARD = { front: 1.3964, rear: -2.0 };
+
+/**
+ * The authored half-track, m — the 2011 source put the wheels at z = ±0.69,
+ * and the suspension mesh's wishbone tips only reach |x| ≈ 0.56, entering the
+ * rims at this spacing. The physics half-track (0.8 m) is a handling decision
+ * that stays in the kernel; drawing the wheels there instead left 11 cm of
+ * daylight between every wheel and its suspension.
+ */
+export const AUTHORED_TRACK_HALF = 0.69;
 
 /**
  * How far forward of the mesh origin the physics CoG sits, m.
@@ -88,7 +98,7 @@ export function chassisAttitudeRotation(pitch, roll) {
  */
 export function wheelRootPosition(i, surface, chassisY) {
   return {
-    x: WHEEL_Y[i],
+    x: Math.sign(WHEEL_Y[i]) * AUTHORED_TRACK_HALF,
     y: surface.height + TYRE_CONTACT_RADIUS - chassisY,
     z: -WHEEL_X[i],
   };

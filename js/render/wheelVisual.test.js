@@ -7,7 +7,7 @@ import { RIDE_HEIGHT_FRONT, RIDE_HEIGHT_REAR } from '../physics/suspension.js';
 import {
   hubBaseY, chassisAttitudeRotation, staticRakePitch,
   wheelRootPosition, suspensionHubOffset, TYRE_CONTACT_RADIUS, IS_FRONT,
-  AUTHORED_HUB_FORWARD, MESH_FORWARD_OFFSET,
+  AUTHORED_HUB_FORWARD, MESH_FORWARD_OFFSET, AUTHORED_TRACK_HALF,
 } from './wheelVisual.js';
 
 test('front hubs sit lower than rear hubs for static rake', () => {
@@ -38,13 +38,29 @@ test('wheelRootPosition is root-local: body-frame offsets, no yaw', () => {
   const surface = { height: 0 };
   for (let i = 0; i < 4; i++) {
     const p = wheelRootPosition(i, surface, 0);
-    assert.ok(Math.abs(p.x - WHEEL_Y[i]) < 1e-9, `corner ${i}: local x is the lateral offset`);
+    assert.ok(Math.abs(p.x - Math.sign(WHEEL_Y[i]) * AUTHORED_TRACK_HALF) < 1e-9,
+      `corner ${i}: local x is the authored lateral offset`);
     assert.ok(Math.abs(p.z - -WHEEL_X[i]) < 1e-9, `corner ${i}: local -z is forward`);
   }
   const front = wheelRootPosition(0, surface, 0);
   const rear = wheelRootPosition(2, surface, 0);
   assert.ok(front.z < 0 && rear.z > 0, 'front hubs ahead of the origin, rear behind');
   assert.ok(Math.abs((-front.z + rear.z) - WB) < 1e-9, 'hubs span the wheelbase');
+});
+
+test('wheels are drawn on the authored track, inboard of the physics track', () => {
+  // The physics half-track (0.8 m) is a handling decision; the mesh was
+  // authored with hubs at ±0.69 m (2011 source: wheel z = ±0.69), and the
+  // wishbone tips only reach |x| ≈ 0.56. Drawing at the physics track left
+  // 11 cm of daylight between every wheel and its suspension.
+  assert.equal(AUTHORED_TRACK_HALF, 0.69);
+  assert.ok(AUTHORED_TRACK_HALF < Math.abs(WHEEL_Y[0]), 'drawn wheels sit inboard of the physics track');
+});
+
+test('tyres touch the road: contact radius equals the authored tyre radius', () => {
+  // The Tyre.bin geometry has radius exactly 0.334 (= WHEEL_RADIUS); anything
+  // larger floats the tyres above the deck.
+  assert.equal(TYRE_CONTACT_RADIUS, WHEEL_RADIUS);
 });
 
 test('suspensionHubOffset tracks corner compression', () => {
