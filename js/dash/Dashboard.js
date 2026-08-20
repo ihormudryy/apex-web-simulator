@@ -126,7 +126,14 @@ export class Dashboard {
     this.brakeRow = el('div', 'dash__row');
     this.ersRow = el('div', 'dash__row');
     this.rideRow = el('div', 'dash__row');
-    panel.append(this.brakeRow, this.ersRow, this.rideRow);
+    this.damageRow = el('div', 'dash__row dash__row--damage');
+    panel.append(this.brakeRow, this.ersRow, this.rideRow, this.damageRow);
+
+    // The terminal banner lives outside the panel: "the race is over" is not a
+    // telemetry channel, it is the one thing on screen that matters.
+    this.terminalBanner = el('div', 'dash__terminal');
+    this.terminalBanner.textContent = 'TERMINAL DAMAGE — ESC TO RESET';
+    this.root.append(this.terminalBanner);
     return panel;
   }
 
@@ -157,6 +164,18 @@ export class Dashboard {
       ? `Ride ${(s.rideFront * 1000).toFixed(0)} / ${(s.rideRear * 1000).toFixed(0)} mm`
         + (s.plankContact ? '  SPARKS' : s.onBumpStop ? '  stops' : '')
       : 'Ride --');
+
+    const d = s.damage;
+    if (d) {
+      const pct = v => `${Math.round(v * 100)}`;
+      this._setOnce(this.damageRow, d.total > 0.005
+        ? `Damage  wing ${pct(d.wing)}%  floor ${pct(d.floor)}%  `
+          + `susp ${d.wheels.map(pct).join('/')}%`
+        : 'Damage  none');
+      this.damageRow.dataset.state = d.terminal ? 'terminal'
+        : d.total > 0.8 ? 'heavy' : d.total > 0.005 ? 'some' : 'none';
+      this.terminalBanner.classList.toggle('dash__terminal--on', Boolean(d.terminal));
+    }
   }
 
   /** Write only when the text has changed — the DOM is the expensive part here. */

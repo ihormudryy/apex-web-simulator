@@ -83,7 +83,18 @@ export const S_DRS = 57;
 export const S_FUEL = 58;
 export const S_TIME = 59;
 
-export const STATE_LENGTH = 60;
+// --- damage -------------------------------------------------------------------
+/**
+ * Accumulated damage, 0..1 per system. In the state vector rather than a side
+ * object for the same reason everything else is: the vector is a complete
+ * snapshot, and a replay that reproduced the trajectory but forgot the car was
+ * dragging a broken corner would diverge from the recording at the first corner.
+ */
+export const S_DMG_WING = 60;
+export const S_DMG_FLOOR = 61;
+export const S_DMG_WHEEL = 62;          // 62..65
+
+export const STATE_LENGTH = 66;
 
 /** Human-readable names, for telemetry headers and for debugging a snapshot. */
 export const STATE_NAMES = (() => {
@@ -103,6 +114,7 @@ export const STATE_NAMES = (() => {
     [S_TYRE_SURFACE_T]: 'tyreSurfaceT', [S_TYRE_CARCASS_T]: 'tyreCarcassT',
     [S_TYRE_WEAR]: 'tyreWear', [S_BRAKE_T]: 'brakeT',
     [S_ZW]: 'zw', [S_VW]: 'vw',
+    [S_DMG_WHEEL]: 'dmgWheel',
   };
   const corner = ['FL', 'FR', 'RL', 'RR'];
   for (const [base, name] of Object.entries(scalars)) names[base] = name;

@@ -223,8 +223,11 @@ test('the barriers contain a car driven straight at them', () => {
   const track = silverstone();
   const car = spawnedCar(track);
   const start = track.query(car.x, car.z);
-  // Point it at the outside wall and pin the throttle.
-  car.yaw = Math.atan2(-start.normal.x, -start.normal.z);
+  // Point it at the outside wall and pin the throttle. Through setPose — writing
+  // `car.yaw` directly has been dead since the kernel rewrite (it is a mirrored
+  // field), so this test spent months testing a crash at the first corner
+  // instead of the head-on it describes.
+  setPose(car, car.x, car.z, Math.atan2(-start.normal.x, -start.normal.z), track);
   const input = { ...noInput(), forward: true };
   let worst = 0;
   for (let f = 0; f < 60 * 30; f++) {
@@ -235,6 +238,9 @@ test('the barriers contain a car driven straight at them', () => {
   }
   assert.equal(car.resets, 0, 'physics blew up against the barrier');
   assert.ok(worst < 1.5, `car pushed ${worst.toFixed(2)} m past the barrier`);
+  // And a head-on at speed is not free any more.
+  const sim = telemetryOf(car);
+  assert.ok(sim.damage.total > 0.1, `a pinned head-on left only ${sim.damage.total.toFixed(2)} damage`);
 });
 
 test('a car left alone on the grid stays on the grid', () => {

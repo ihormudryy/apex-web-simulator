@@ -221,6 +221,8 @@ export function createTelemetry({
       steerTorque: sim.steerTorque,
       plankContact: sim.plankContact,
       onBumpStop: sim.onBumpStop,
+      damage: sim.damage,
+      wallScrape: sim.wallScrape,
 
       surface: q.surface,
       offTrack: q.surface !== 'tarmac',

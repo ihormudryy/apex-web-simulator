@@ -233,4 +233,20 @@ export const DASH_CSS = `
 .dash__panel--car .dash__grid { gap: 2px 5px; margin: 1px 0 3px; }
 .dash__panel--car .dash__cell { font-size: 11px; padding: 1px 4px; }
 .dash__panel--car .dash__row { font-size: 11px; line-height: 1.32; }
+
+/* Damage readout, coloured by how bad it is. */
+.dash__row--damage[data-state=some] { color: #e8c66a; }
+.dash__row--damage[data-state=heavy] { color: #ff9a6a; }
+.dash__row--damage[data-state=terminal] { color: #ff5a4a; }
+
+/* The end of the race. Centre screen, unmissable, nothing else like it. */
+.dash__terminal {
+  display: none;
+  position: fixed; left: 50%; top: 38%; transform: translate(-50%, -50%);
+  padding: 14px 26px; border-radius: 6px;
+  background: rgba(24, 4, 2, 0.82); border: 1px solid rgba(255, 90, 74, 0.65);
+  color: #ff5a4a; font-size: 20px; letter-spacing: 0.14em; font-weight: 600;
+  text-shadow: 0 0 18px rgba(255, 60, 40, 0.35);
+}
+.dash__terminal--on { display: block; }
 `;

@@ -266,8 +266,11 @@ export function groundEffect(out, c) {
   // reaches the downforce. The floor is not adjustable — it is bodywork.
   const wingFront = c.claWingFront ?? CLA_WING_FRONT;
   const wingRear = c.claWingRear ?? CLA_WING_REAR;
-  let claFront = wingFront + CLA_FLOOR_FRONT * out.floorLagFront;
-  let claRear = wingRear + CLA_FLOOR_REAR * out.floorLagRear;
+  // `floorScale` is how floor damage arrives: a holed floor makes less of its
+  // load at every ride height, front and rear together.
+  const floorScale = c.floorScale ?? 1;
+  let claFront = wingFront + CLA_FLOOR_FRONT * out.floorLagFront * floorScale;
+  let claRear = wingRear + CLA_FLOOR_REAR * out.floorLagRear * floorScale;
 
   // DRS and active aero act on the rear wing only.
   const open = Boolean(c.drs) || Boolean(c.activeAero && c.drs);

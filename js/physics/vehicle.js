@@ -29,6 +29,8 @@ import {
 } from './kernel.js';
 import { createClock, resetClock, pump, DT, lerp } from './fixedStep.js';
 import { packInput, recordStep } from './replay.js';
+import { resolveWallContact, createContact } from './collision.js';
+import { applyImpact, applyScrape, totalDamage } from './damage.js';
 import {
   createDriverState, resetDriver, tractionThrottle, brakeModulation,
   createSteerState, steerRamp, maxSteerAt, drsAllowed, MAX_STEER_DEG,
@@ -79,6 +81,11 @@ export function createVehicle({ x = 0, z = 0, yaw = 0, warm = true, setup = null
     steering: createSteerState(),
     /** Whether the driver model modulates the pedals. Off for a wheel and pedals. */
     aids: true,
+
+    /** The latest wall contact, for effects, audio and the HUD. */
+    contact: createContact(),
+    /** Peak impact severity since last read — effects consume and clear it. */
+    lastImpact: 0,
 
     /** Set to a recording to capture inputs on the sim clock. See replay.js. */
     recorder: null,
@@ -264,12 +271,16 @@ function simStep(v, throttle, brake, track, drsHeld) {
   }, track, DT);
 
   // Barriers. The kernel knows the surface under each wheel; walls belong to the
-  // circuit, so the test happens where the circuit is known.
-  const sample = track.query(S[ST.S_X], S[ST.S_Z]);
-  if (sample.wallLimit !== undefined && Math.abs(sample.lateral) > sample.wallLimit) {
-    const sign = sample.lateral > 0 ? -1 : 1;
-    const penetration = Math.abs(sample.lateral) - sample.wallLimit;
-    applyWallImpulse(v, sample.normal.x, sample.normal.z, sign, penetration);
+  // circuit, so contact is resolved here where the circuit is known. The car is a
+  // body with corners, not a point — see collision.js — and what the wall costs
+  // beyond momentum is damage: wing, floor and suspension, through damage.js.
+  const contact = resolveWallContact(S, track, v.contact);
+  if (contact.hit && contact.severity > 0) {
+    applyImpact(S, contact.severity, contact.corner);
+    v.lastImpact = Math.max(v.lastImpact, contact.severity);
+  }
+  if (contact.corner >= 0 && contact.scrape > 0.5) {
+    applyScrape(S, contact.scrape, DT);
   }
 
   // Wheel rotation for the renderer, accumulated over the frame.
@@ -294,19 +305,6 @@ export function replayStep(v, input, track) {
   simStep(v, throttle, brake, track, Boolean(input.drs));
   v.clock.simTime += DT;
   if (v.observer) v.observer(v);
-  mirror(v);
-}
-
-export function applyWallImpulse(v, nx, nz, sign, penetration) {
-  const S = v.car.S;
-  S[ST.S_X] -= sign * penetration * nx;
-  S[ST.S_Z] -= sign * penetration * nz;
-  const vDotN = S[ST.S_VX] * nx + S[ST.S_VZ] * nz;
-  if (vDotN * sign > 0) {
-    S[ST.S_VX] -= vDotN * nx * 1.2;
-    S[ST.S_VZ] -= vDotN * nz * 1.2;
-    S[ST.S_AV] *= 0.5;
-  }
   mirror(v);
 }
 
@@ -366,5 +364,19 @@ export function telemetryOf(v) {
       S[ST.S_BRAKE_T], S[ST.S_BRAKE_T + 1],
       S[ST.S_BRAKE_T + 2], S[ST.S_BRAKE_T + 3],
     ],
+    damage: {
+      wing: S[ST.S_DMG_WING],
+      floor: S[ST.S_DMG_FLOOR],
+      wheels: [
+        S[ST.S_DMG_WHEEL], S[ST.S_DMG_WHEEL + 1],
+        S[ST.S_DMG_WHEEL + 2], S[ST.S_DMG_WHEEL + 3],
+      ],
+      total: totalDamage(S),
+      terminal: out.terminal,
+    },
+    wallContact: v.contact.corner >= 0 && v.contact.touching > 0,
+    wallScrape: v.contact.touching > 0 ? v.contact.scrape : 0,
+    wallX: v.contact.x,
+    wallZ: v.contact.z,
   };
 }

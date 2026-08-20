@@ -71,6 +71,7 @@ import {
   WHEEL_X, WHEEL_Y,
 } from './surface.js';
 import { applySetup, defaultSetup } from './setup.js';
+import { damageEffects, createDamageEffects } from './damage.js';
 import * as S_ from './state.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -175,6 +176,8 @@ export function createCar({ x = 0, z = 0, yaw = 0, shared = false, setup = null 
     brakes: createBrakeState(),
     surfaces: createSurfaceSamples(),
     ground: createGroundPlane(),
+    /** Damage-derived physics modifiers, recomputed each step from the state. */
+    damage: createDamageEffects(),
     /**
      * Per-wheel outputs, for telemetry, audio and the renderer.
      *
@@ -199,6 +202,7 @@ export function createCar({ x = 0, z = 0, yaw = 0, shared = false, setup = null 
       steerTorque: 0,
       plankContact: false,
       onBumpStop: false,
+      terminal: false,
       groundHeight: 0,
       gradeLong: 0,
       gradeLat: 0,
@@ -340,6 +344,11 @@ export function step(car, input, track, dt) {
   S[S_.S_STEER] = steer;
   S[S_.S_DRS] = input.drs ? 1 : 0;
 
+  // Damage first: everything below reads its modifiers. The damage state lives
+  // in the vector (so a replayed crash is still a crash); this derives the
+  // physics-facing numbers from it.
+  const dmg = damageEffects(S, car.damage);
+
   const yaw = S[S_.S_YAW];
   const sinY = Math.sin(yaw);
   const cosY = Math.cos(yaw);
@@ -371,9 +380,13 @@ export function step(car, input, track, dt) {
   cond.yawRate = av;
   cond.drs = Boolean(input.drs);
   cond.dt = dt;
-  cond.claWingFront = car.tune.claWingFront;
+  // A broken front wing is missing downforce; a broken floor is missing floor
+  // load and dragging bodywork. Both arrive as the aero inputs they physically
+  // are, so a damaged car understeers and slows for real reasons.
+  cond.claWingFront = car.tune.claWingFront * dmg.wingScale;
   cond.claWingRear = car.tune.claWingRear;
-  cond.cdaWings = car.tune.cdaWings;
+  cond.cdaWings = car.tune.cdaWings + dmg.cdaExtra;
+  cond.floorScale = dmg.floorScale;
   const aero = groundEffect(car.aero, cond);
   S[S_.S_FLOOR_LAG_FRONT] = aero.floorLagFront;
   S[S_.S_FLOOR_LAG_REAR] = aero.floorLagRear;
@@ -430,6 +443,10 @@ export function step(car, input, track, dt) {
   if (throttle < 0 && vLong > -REVERSE_SPEED_LIMIT) {
     driveTorque = throttle * REVERSE_TORQUE;
   }
+  // Terminal damage is the end of the race: a broken corner or enough
+  // accumulated wreckage cuts the engine. The car still rolls, steers and
+  // brakes — it just cannot continue.
+  if (dmg.terminal) driveTorque = Math.min(0, driveTorque);
 
   // ---- brakes -----------------------------------------------------------
   const demandTotal = BRAKE_TORQUE_MAX * brakePedal;
@@ -486,7 +503,9 @@ export function step(car, input, track, dt) {
 
     const omega = S[S_.S_OMEGA + i];
     const kappa = slipRatio(wLong, omega, V_RELAX);
-    const alpha = slipAngle(wLat, wLong, V_RELAX);
+    // Bent suspension is an alignment error: a constant slip-angle offset on the
+    // damaged wheel, which is why a hit car pulls to one side down the straight.
+    const alpha = slipAngle(wLat, wLong, V_RELAX) + dmg.toe[i];
     out.slipRatio[i] = kappa;
     out.slipAngle[i] = alpha;
 
@@ -507,7 +526,8 @@ export function step(car, input, track, dt) {
     tyre.wear = S[S_.S_TYRE_WEAR + i];
     // The per-axle scale is what makes the rear tyre a bigger tyre.
     const d = peakGrip(surf.mu, fz,
-      gripScale(tyre) * (isFront ? car.tune.muScaleFront : car.tune.muScaleRear));
+      gripScale(tyre) * (isFront ? car.tune.muScaleFront : car.tune.muScaleRear)
+      * dmg.gripScale[i]);
 
     combinedSlipForces(d, kappaLag, alphaLag, car._force);
     let fxW = car._force.fx;
@@ -548,8 +568,12 @@ export function step(car, input, track, dt) {
     const regenTorque = driven[i] ? regenWheelTorque / 2 : 0;
 
     const inertia = WHEEL_INERTIA + (driven[i] ? reflectedInertia : 0);
-    S[S_.S_OMEGA + i] = wheelAngularStep(
-      omega, wheelDrive, brakeTorque + regenTorque, fxW, dt, inertia);
+    S[S_.S_OMEGA + i] = dmg.locked[i]
+      // A broken corner jams its wheel: the tyre drags at full slip, which is
+      // what actually stops a car with a wheel hanging off.
+      ? 0
+      : wheelAngularStep(
+        omega, wheelDrive, brakeTorque + regenTorque, fxW, dt, inertia);
 
     // ---- back to body axes -------------------------------------------------
     const fxB = isFront ? fxW * cosD + fyW * sinD : fxW;
@@ -639,6 +663,7 @@ export function step(car, input, track, dt) {
   out.aLat = aLat;
   out.plankContact = aero.plankContact;
   out.onBumpStop = car.suspension.onBumpStop;
+  out.terminal = dmg.terminal;
   out.groundHeight = ground.height;
   out.gradeLong = ground.gradeLong;
   out.gradeLat = ground.gradeLat;

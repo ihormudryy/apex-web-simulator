@@ -282,7 +282,27 @@ export function updateCarEffects(fx, c, dt) {
       }
     }
 
-    // Exhaust haze, which is engine load rather than temperature.
+    // Wall scrape: sparks from the contact point the collision resolve reported.
+  // The same shower as the plank, because it is the same physics — metal ground
+  // against an abrasive at speed.
+  if (c.wallScrape > 3) {
+    const rate = sparkRate(6000, c.wallScrape);
+    const n = takeBudget(fx.sparks.budget, rate * 200 * dt);
+    for (let k = 0; k < n; k++) {
+      const back = 0.3 + Math.random() * 0.5;
+      emit(
+        fx.sparks.ring,
+        c.wallX, c.groundY + 0.25 + Math.random() * 0.5, c.wallZ,
+        -c.forwardX * c.wallScrape * back + (Math.random() - 0.5) * 6,
+        1 + Math.random() * 3,
+        -c.forwardZ * c.wallScrape * back + (Math.random() - 0.5) * 6,
+        0.3 + Math.random() * 0.4,
+        0.5 + Math.random() * 0.8,
+      );
+    }
+  }
+
+  // Exhaust haze, which is engine load rather than temperature.
     const exhaust = exhaustHaze(c.throttle, sim.rpm);
     if (c.exhaust) {
       const n = takeBudget(fx.haze.budget, Math.max(0, exhaust - 0.25) * 14 * dt);
