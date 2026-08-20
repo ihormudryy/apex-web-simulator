@@ -39,7 +39,7 @@ function tyreStackGeometry(tiers) {
  *
  * @param {{ samples: object[], length: number }} centerline
  */
-export function createTracksideProps(centerline) {
+export function createTracksideProps(centerline, baseY = 0) {
   const group = new THREE.Group();
   group.name = 'tracksideProps';
 
@@ -62,7 +62,7 @@ export function createTracksideProps(centerline) {
     const dummy = new THREE.Object3D();
     for (let i = 0; i < posts.length; i++) {
       const p = posts[i];
-      dummy.position.set(p.x, 0, p.z);
+      dummy.position.set(p.x, (typeof baseY === 'function' ? baseY(p.x, p.z) : baseY) + (0), p.z);
       dummy.rotation.set(0, p.yaw, 0);
       dummy.updateMatrix();
       postMesh.setMatrixAt(i, dummy.matrix);
@@ -86,7 +86,7 @@ export function createTracksideProps(centerline) {
     const dummy = new THREE.Object3D();
     for (let i = 0; i < boards.length; i++) {
       const b = boards[i];
-      dummy.position.set(b.x, 1.05, b.z);
+      dummy.position.set(b.x, (typeof baseY === 'function' ? baseY(b.x, b.z) : baseY) + (1.05), b.z);
       dummy.lookAt(b.lookX, 1.05, b.lookZ);
       dummy.updateMatrix();
       boardMesh.setMatrixAt(i, dummy.matrix);
@@ -117,7 +117,7 @@ export function createTracksideProps(centerline) {
       const dummy = new THREE.Object3D();
       for (let i = 0; i < list.length; i++) {
         const s = list[i];
-        dummy.position.set(s.x, 0.12, s.z);
+        dummy.position.set(s.x, (typeof baseY === 'function' ? baseY(s.x, s.z) : baseY) + (0.12), s.z);
         dummy.rotation.set(0, s.yaw, 0);
         dummy.updateMatrix();
         mesh.setMatrixAt(i, dummy.matrix);

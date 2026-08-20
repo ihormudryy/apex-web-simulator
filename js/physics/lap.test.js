@@ -9,8 +9,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createVehicle, setPose, advance, updateSteering, forwardSpeed, lateralSpeed,
+  telemetryOf,
 } from './vehicle.js';
-import { WB } from './constants.js';
+import { WB, MU } from './constants.js';
+import {
+  surfaceHeight, surfaceRoughness, verticalCurvature,
+} from '../track/elevation.js';
 import { buildCenterline } from '../track/centerline.js';
 import { SILVERSTONE_WAYPOINTS } from '../track/silverstoneWaypoints.js';
 
@@ -23,10 +27,20 @@ const wrap = a => {
   return a;
 };
 
-function silverstone() {
+/**
+ * The circuit as the physics sees it.
+ *
+ * `elevated` adds the three-dimensional surface — elevation, banking, the
+ * drainage crown, bumps and kerb profiles — through the same `queryWheel` the
+ * browser uses. A separate hint cursor from `query`, because the four wheels are
+ * within two metres of each other and sharing one with the chassis query made
+ * every wheel walk the ring from wherever the chassis last looked.
+ */
+function silverstone({ elevated = false } = {}) {
   const centerline = buildCenterline(SILVERSTONE_WAYPOINTS, 4000);
   let hint = 0;
-  return {
+  let wheelHint = 0;
+  const track = {
     centerline,
     query(x, z) {
       const r = centerline.query(x, z, hint);
@@ -34,12 +48,27 @@ function silverstone() {
       return r;
     },
   };
+  if (elevated) {
+    track.queryWheel = (x, z, out) => {
+      const q = centerline.query(x, z, wheelHint);
+      wheelHint = q.index;
+      out.surface = q.surface;
+      out.mu = MU[q.surface] ?? MU.grass;
+      out.height = surfaceHeight(q, centerline.length);
+      out.roughness = surfaceRoughness(q);
+      out.curvature = verticalCurvature(q.t, centerline.length);
+      out.nx = 0;
+      out.nz = 0;
+      return out;
+    };
+  }
+  return track;
 }
 
 function spawnedCar(track) {
   const s = track.centerline.samples[0];
   const car = createVehicle();
-  setPose(car, s.x, s.z, Math.atan2(-s.tx, -s.tz));
+  setPose(car, s.x, s.z, Math.atan2(-s.tx, -s.tz), track);
   return car;
 }
 
@@ -103,8 +132,8 @@ function makeDriver({ latG = 1.4, topSpeed = 45, brakeG = 3.0 } = {}) {
   };
 }
 
-function runLaps(seconds, options) {
-  const track = silverstone();
+function runLaps(seconds, options = {}) {
+  const track = silverstone({ elevated: options.elevated });
   const car = spawnedCar(track);
   const input = noInput();
   const drive = makeDriver(options);
@@ -112,6 +141,8 @@ function runLaps(seconds, options) {
     laps: 0, lapTimes: [], frames: 0, offRoad: 0, wallFrames: 0,
     worstLateral: 0, worstSlip: 0, topSpeed: 0,
     surfaces: { tarmac: 0, kerb: 0, grass: 0 },
+    minRide: Infinity, maxRide: -Infinity, plankFrames: 0, bumpStopFrames: 0,
+    minLoad: Infinity, maxLoad: 0, minGround: Infinity, maxGround: -Infinity,
   };
   let prevT = 0, lapStart = 0;
   const frames = Math.round(seconds / DT);
@@ -125,6 +156,16 @@ function runLaps(seconds, options) {
       stats.worstSlip = Math.max(stats.worstSlip,
         Math.abs(Math.atan2(lateralSpeed(car), forwardSpeed(car))));
     }
+    const sim = telemetryOf(car);
+    stats.minRide = Math.min(stats.minRide, sim.rideFront);
+    stats.maxRide = Math.max(stats.maxRide, sim.rideFront);
+    stats.minGround = Math.min(stats.minGround, sim.groundHeight);
+    stats.maxGround = Math.max(stats.maxGround, sim.groundHeight);
+    if (sim.plankContact) stats.plankFrames++;
+    if (sim.onBumpStop) stats.bumpStopFrames++;
+    const totalLoad = sim.fz[0] + sim.fz[1] + sim.fz[2] + sim.fz[3];
+    stats.minLoad = Math.min(stats.minLoad, totalLoad);
+    stats.maxLoad = Math.max(stats.maxLoad, totalLoad);
     if (Math.abs(q.lateral) > q.halfWidth + 1) stats.offRoad++;
     if (Math.abs(q.lateral) > q.wallLimit) stats.wallFrames++;
     if (q.t < prevT - 0.5) {
@@ -201,4 +242,55 @@ test('a car left alone on the grid stays on the grid', () => {
   const drift = Math.hypot(car.x - start.x, car.z - start.z);
   assert.ok(drift < 0.05, `drifted ${drift.toFixed(3)} m in 30 s with no input`);
   assert.ok(Math.abs(car.yaw - start.yaw) < 1e-3, `yawed ${car.yaw - start.yaw} rad`);
+});
+
+// ---------------------------------------------------------------------------
+// The same circuit, in three dimensions
+// ---------------------------------------------------------------------------
+
+test('the elevated circuit can be lapped, and the car stays on the road', () => {
+  // Longer than the flat lap needs: elevation, bumps and the crown cost real time,
+  // which is the point of having them.
+  const stats = runLaps(170, { elevated: true });
+  assert.equal(stats.resets, 0, `${stats.resets} physics resets on the 3D surface`);
+  assert.ok(stats.laps >= 1, `only ${stats.laps} laps in 120 s`);
+  assert.ok(
+    stats.offRoad / stats.frames < 0.06,
+    `off the road for ${(100 * stats.offRoad / stats.frames).toFixed(1)}% of the lap`,
+  );
+});
+
+test('driving the 3D surface keeps the platform inside its working range', () => {
+  const stats = runLaps(120, { elevated: true });
+  // Ride height must move — a flat ribbon would hold it constant — but the car
+  // must not be launched into the air by its own circuit.
+  assert.ok(stats.maxRide - stats.minRide > 0.004, 'the surface must reach the car at all');
+  assert.ok(
+    stats.maxRide < 0.09,
+    `the car reached ${(stats.maxRide * 1000).toFixed(0)} mm of ride height — it is flying`,
+  );
+  assert.ok(stats.minLoad > 500, `the car went nearly airborne: ${stats.minLoad.toFixed(0)} N`);
+});
+
+test('the elevation is actually under the car', () => {
+  const stats = runLaps(120, { elevated: true });
+  assert.ok(
+    stats.maxGround - stats.minGround > 4,
+    `only ${(stats.maxGround - stats.minGround).toFixed(1)} m of elevation seen in a lap`,
+  );
+});
+
+test('the flat and elevated circuits give lap times within a few percent', () => {
+  // Elevation, bumps and a drainage crown should cost a little time, not change
+  // the car into something else. A big divergence means the surface is fighting
+  // the suspension rather than being driven over.
+  const flat = runLaps(150, {});
+  const bumpy = runLaps(150, { elevated: true });
+  assert.ok(flat.laps >= 1 && bumpy.laps >= 1, 'both must complete a lap');
+  const a = Math.min(...flat.lapTimes);
+  const b = Math.min(...bumpy.lapTimes);
+  assert.ok(
+    b > a * 0.9 && b < a * 1.25,
+    `flat ${a.toFixed(1)} s against elevated ${b.toFixed(1)} s`,
+  );
 });

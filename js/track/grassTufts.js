@@ -150,7 +150,10 @@ function buildMaterial(surfaceNodes) {
  * order — a chase camera submits only the few chunks actually in view.
  *
  * @param {{ samples: object[], length: number }} centerline
- * @param {number} baseY world height of the tuft root (runoff plane)
+ * @param {number|function} baseY world height of the tuft root. A number for a
+ *   flat runoff; a `(x, z) => y` function once the ground has elevation, which it
+ *   now does — 34 000 blades pinned to a single plane float clear of the surface
+ *   at the high points of the circuit and are buried at the low ones.
  */
 export function createGrassTufts(centerline, baseY = -0.04, {
   chunks = 96, plan = {}, surfaceNodes = null,
@@ -177,7 +180,7 @@ export function createGrassTufts(centerline, baseY = -0.04, {
     const mesh = new THREE.InstancedMesh(chunkGeometry(baseGeometry, slice), material, slice.length);
     for (let i = 0; i < slice.length; i++) {
       const p = slice[i];
-      dummy.position.set(p.x, baseY, p.z);
+      dummy.position.set(p.x, typeof baseY === 'function' ? baseY(p.x, p.z) : baseY, p.z);
       dummy.rotation.set(0, p.yaw, 0);
       dummy.scale.setScalar(p.scale);
       dummy.updateMatrix();

@@ -95,7 +95,7 @@ export class Car {
     // out of the kernel's flat state vector once a frame, so zeroing them here
     // would be overwritten on the next step and the car would drive off with the
     // velocity it was supposed to have lost.
-    resetVehicle(this.vehicle);
+    resetVehicle(this.vehicle, this._track ?? null);
     this.root.position.set(x, this.root.position.y, z);
     this.root.rotation.y = yaw;
     this._braking = false;
@@ -404,14 +404,20 @@ export class Car {
 
   updatePhysics(dt, track) {
     const v = this.vehicle;
+    this._track = track;
     advance(v, this.input, track, dt);
 
     // Interpolated, not raw: the sim runs at a fixed 600 Hz and the display does
     // not, so drawing the latest state directly shows a step pattern of 10, 10,
     // 11 states per frame that reads as micro-stutter.
     const pose = renderPose(v, this._pose);
-    this.root.position.set(pose.x, this.root.position.y, pose.z);
+    // Y follows the surface, and the body takes the road's attitude plus its own.
+    // The car used to sit on a plane at y = 0 whatever the track did.
+    const sim = telemetryOf(v);
+    this.root.position.set(pose.x, sim.groundHeight + sim.heave, pose.z);
     this.root.rotation.y = pose.yaw;
+    this.visualRoot.rotation.x = -(sim.gradeLong + sim.pitch);
+    this.visualRoot.rotation.z = sim.gradeLat + sim.roll;
 
     if (this.brakeMat && v.braking !== this._braking) {
       this._braking = v.braking;

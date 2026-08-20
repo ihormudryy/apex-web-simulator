@@ -40,7 +40,12 @@ function fenceAlphaTexture() {
  *
  * @param {{ samples: object[], length: number }} centerline
  */
-export function createCatchFence(centerline) {
+/**
+ * @param {object} centerline
+ * @param {number|function} [baseY] ground height at the panel. A `(x, z) => y`
+ *   function once the ground has elevation.
+ */
+export function createCatchFence(centerline, baseY = 0) {
   const panels = planCatchFence(centerline.samples, centerline.length);
   if (!panels.length) return new THREE.Group();
 
@@ -84,8 +89,9 @@ export function createCatchFence(centerline) {
   const dummy = new THREE.Object3D();
   for (let i = 0; i < panels.length; i++) {
     const p = panels[i];
-    dummy.position.set(p.x, panelH * 0.5, p.z);
-    dummy.lookAt(p.lookX, panelH * 0.5, p.lookZ);
+    const base = typeof baseY === 'function' ? baseY(p.x, p.z) : baseY;
+    dummy.position.set(p.x, base + panelH * 0.5, p.z);
+    dummy.lookAt(p.lookX, base + panelH * 0.5, p.lookZ);
     dummy.updateMatrix();
     panelMesh.setMatrixAt(i, dummy.matrix);
     postMesh.setMatrixAt(i, dummy.matrix);

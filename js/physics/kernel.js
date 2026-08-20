@@ -66,7 +66,10 @@ import {
   BATTERY_CAPACITY, brakeMu, createBrakeState, brakeThermalStep, brakeByWire,
   IDLE_RPM, TOP_GEAR,
 } from './powertrain.js';
-import { createSurfaceSamples, sampleWheelSurfaces, WHEEL_X, WHEEL_Y } from './surface.js';
+import {
+  createSurfaceSamples, sampleWheelSurfaces, fitGroundPlane, createGroundPlane,
+  WHEEL_X, WHEEL_Y,
+} from './surface.js';
 import * as S_ from './state.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -167,6 +170,7 @@ export function createCar({ x = 0, z = 0, yaw = 0, shared = false } = {}) {
     ers: createErsState(),
     brakes: createBrakeState(),
     surfaces: createSurfaceSamples(),
+    ground: createGroundPlane(),
     /**
      * Per-wheel outputs, for telemetry, audio and the renderer.
      *
@@ -191,6 +195,10 @@ export function createCar({ x = 0, z = 0, yaw = 0, shared = false } = {}) {
       steerTorque: 0,
       plankContact: false,
       onBumpStop: false,
+      groundHeight: 0,
+      gradeLong: 0,
+      gradeLat: 0,
+      roughness: 0,
     },
     /** Scratch, reused so the step allocates nothing. */
     _force: { fx: 0, fy: 0 },
@@ -203,6 +211,11 @@ export function createCar({ x = 0, z = 0, yaw = 0, shared = false } = {}) {
     _load: { aeroFront: 0, aeroRear: 0, ax: 0, ay: 0, ground: [0, 0, 0, 0] },
     resets: 0,
     spawn: { x, z, yaw },
+    /**
+     * Ground height the suspension is referenced to. Set when the car is placed,
+     * so spawning on an 8 m plateau is not an 8 m step into the springs.
+     */
+    datum: 0,
   };
   resetCar(car);
   S[S_.S_X] = x;
@@ -260,13 +273,28 @@ export function warmUp(car) {
   return car;
 }
 
-export function setSpawn(car, x, z, yaw) {
+export function setSpawn(car, x, z, yaw, groundHeight = null) {
   car.spawn.x = x;
   car.spawn.z = z;
   car.spawn.yaw = yaw;
   car.S[S_.S_X] = x;
   car.S[S_.S_Z] = z;
   car.S[S_.S_YAW] = yaw;
+  if (groundHeight !== null) car.datum = groundHeight;
+}
+
+/**
+ * Re-reference the suspension to the ground under the car right now.
+ *
+ * Called after a teleport. Without it, dropping the car onto a part of the circuit
+ * 6 m above where it was placed is a 6 m step into springs that resolve
+ * millimetres, which is a spectacular way to lose a car.
+ */
+export function rebaseToGround(car, track) {
+  sampleWheelSurfaces(track, car.S[S_.S_X], car.S[S_.S_Z], car.S[S_.S_YAW], car.surfaces);
+  fitGroundPlane(car.surfaces, car.ground);
+  car.datum = car.ground.height;
+  return car.datum;
 }
 
 /** Launch the car at a speed, for a measurement that starts mid-track. */
@@ -322,6 +350,10 @@ export function step(car, input, track, dt) {
   const sideslip = Math.atan2(vLat, Math.max(Math.abs(vLong), V_RELAX));
 
   sampleWheelSurfaces(track, S[S_.S_X], S[S_.S_Z], yaw, car.surfaces);
+  // Plane plus residual: the plane is where the car is and how steep the road is,
+  // the residual is the bumps. Handing absolute height to a suspension that works
+  // in displacement-from-static would compress every spring by the hill.
+  const ground = fitGroundPlane(car.surfaces, car.ground);
 
   // ---- aero, from the ride heights the suspension last reported -----------
   // A one-step lag, which at 600 Hz is 1.7 ms. Solving it simultaneously would
@@ -346,7 +378,13 @@ export function step(car, input, track, dt) {
   load.aeroRear = aero.fzRear - aero.plankRear;
   load.ax = S[S_.S_A_LONG];
   load.ay = S[S_.S_A_LAT];
-  for (let i = 0; i < 4; i++) load.ground[i] = car.surfaces[i].height;
+  // Raw wheel heights, less the datum the car was placed at. The suspension's
+  // heave, pitch and roll are free DOFs, so it settles onto any plane by itself
+  // and the springs return to static — while a kerb, a crest and a compression
+  // all arrive as the transients they actually are. Handing it the plane residual
+  // instead deleted every one of them: two wheels on a kerb is indistinguishable
+  // from banking once you have subtracted a plane.
+  for (let i = 0; i < 4; i++) load.ground[i] = car.surfaces[i].height - car.datum;
   suspensionStep(car.suspension, load, dt);
 
   // ---- powertrain --------------------------------------------------------
@@ -548,6 +586,11 @@ export function step(car, input, track, dt) {
   sumFy += dragLat + aero.sideForce;
   sumMav += aero.yawMoment - mzTotal;
 
+  // Gravity along the road. This is what makes a hill cost time going up and give
+  // it back coming down, and what makes a banked corner hold the car in.
+  sumFx -= MASS * G * ground.gradeLong;
+  sumFy -= MASS * G * ground.gradeLat;
+
   // ---- integrate --------------------------------------------------------
   const aLong = sumFx / MASS;
   const aLat = sumFy / MASS;
@@ -586,6 +629,11 @@ export function step(car, input, track, dt) {
   out.aLat = aLat;
   out.plankContact = aero.plankContact;
   out.onBumpStop = car.suspension.onBumpStop;
+  out.groundHeight = ground.height;
+  out.gradeLong = ground.gradeLong;
+  out.gradeLat = ground.gradeLat;
+  out.roughness = 0.25 * (car.surfaces[0].roughness + car.surfaces[1].roughness
+    + car.surfaces[2].roughness + car.surfaces[3].roughness);
 
   syncToState(car);
 

@@ -477,7 +477,7 @@ class HelloRacer {
    * untouched, so a reset car drove off with the velocity it had before.
    */
   _zeroVehicle(v) {
-    resetVehicle(v);
+    resetVehicle(v, this.track);
   }
 
   _placeCarOnTrack() {
@@ -485,7 +485,7 @@ class HelloRacer {
     const yaw = Math.atan2(-s.tx, -s.tz);
     this.car.root.position.set(s.x, 0, s.z);
     this.car.root.rotation.y = yaw;
-    setPose(this.car.vehicle, s.x, s.z, yaw);
+    setPose(this.car.vehicle, s.x, s.z, yaw, this.track);
     this._zeroVehicle(this.car.vehicle);
   }
 

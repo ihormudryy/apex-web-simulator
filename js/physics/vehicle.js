@@ -24,7 +24,8 @@
  */
 
 import {
-  createCar, step as kernelStep, resetCar, setSpawn, warmUp, launch as kernelLaunch,
+  createCar, step as kernelStep, resetCar, setSpawn, warmUp,
+  launch as kernelLaunch, rebaseToGround,
 } from './kernel.js';
 import { createClock, resetClock, pump, DT, lerp } from './fixedStep.js';
 import { packInput, recordStep } from './replay.js';
@@ -88,16 +89,24 @@ export function createVehicle({ x = 0, z = 0, yaw = 0, warm = true } = {}) {
   return v;
 }
 
-export function setPose(v, x, z, yaw) {
+/**
+ * Place the car. `track` is optional but wanted: without it the suspension keeps
+ * whatever ground datum it had, and dropping the car onto a part of the circuit
+ * several metres higher is a several-metre step into springs that resolve
+ * millimetres.
+ */
+export function setPose(v, x, z, yaw, track = null) {
   setSpawn(v.car, x, z, yaw);
   v.spawn = { x, z, yaw };
   v.prev.x = x; v.prev.z = z; v.prev.yaw = yaw;
+  if (track) rebaseToGround(v.car, track);
   mirror(v);
 }
 
 /** Zero motion and snap back to the spawn pose without counting as a physics reset. */
-export function resetVehicle(v) {
+export function resetVehicle(v, track = null) {
   resetCar(v.car);
+  if (track) rebaseToGround(v.car, track);
   warmUp(v.car);
   resetDriver(v.driver);
   v.steering.smooth = 0;
@@ -319,6 +328,13 @@ export function telemetryOf(v) {
     onBumpStop: out.onBumpStop,
     rideFront: v.car.suspension.rideFront,
     rideRear: v.car.suspension.rideRear,
+    groundHeight: out.groundHeight,
+    gradeLong: out.gradeLong,
+    gradeLat: out.gradeLat,
+    roughness: out.roughness,
+    heave: v.car.suspension.zc,
+    pitch: v.car.suspension.pitch,
+    roll: v.car.suspension.roll,
     fz: out.fz,
     slipRatio: out.slipRatio,
     slipAngle: out.slipAngle,

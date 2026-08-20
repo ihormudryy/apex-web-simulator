@@ -15,13 +15,20 @@ import { createGrassTufts } from './grassTufts.js';
 import { createCatchFence } from './catchFence.js';
 import { createTracksideProps } from './tracksideProps.js';
 import { createTracksideLOD } from './tracksideLOD.js';
+import {
+  surfaceHeight, surfaceRoughness, verticalCurvature,
+  groundFieldHeight, meanElevation, KERB_WIDTH,
+} from './elevation.js';
+import { MU } from '../physics/constants.js';
 
 const DEG90 = Math.PI / 2;
 
 // Marking geometry, in metres. Everything derives from these rather than from a
 // texture-repeat count, so a stripe is the same length whatever the lap length is.
 const KERB_STRIPE = 0.75;      // one red or one white block
-const KERB_WIDTH = 1.0;
+// KERB_WIDTH comes from elevation.js — the geometry and the physics must agree on
+// it, and two copies of a constant is how the friction coefficient ended up wrong
+// in two places at once.
 const DASH_LENGTH = 3.0;
 const DASH_GAP = 6.0;
 const DASH_WIDTH = 0.14;       // half-width of the centre line
@@ -30,6 +37,24 @@ const START_LINE_WIDTH = 0.5;
 // One wrap of the asphalt PBR tile. 4 m is a slight stretch so Hamilton
 // Straight does not read as a stamped pattern from the chase cam.
 const ASPHALT_TILE_M = 4;
+
+/**
+ * Central-difference step for the surface normal, metres. A compromise: smaller
+ * and float64 cancellation shows in the normal, larger and a kerb edge is smeared
+ * into a ramp.
+ */
+const NORMAL_EPS = 0.05;
+
+/**
+ * Lateral subdivision, per strip. Enough to carry the shape and no more: the
+ * asphalt is the one that matters, and at 4000 stations a value of 8 is 36 000
+ * vertices, which is nothing next to the grass.
+ */
+const ASPHALT_SEGMENTS = 8;
+const RUNOFF_SEGMENTS = 4;
+const KERB_SEGMENTS = 5;
+/** Ground grid resolution. Coarse — it is terrain a kilometre wide. */
+const GROUND_SEGMENTS = 110;
 // Close runoff: one wrap of the lawn PBR tile. Distant infield uses a longer
 // period so the 1k map does not strobe from the chase cam.
 const GRASS_RUNOFF_TILE_M = 5;
@@ -79,6 +104,7 @@ export class Track extends THREE.Group {
    */
   constructor(waypoints, {
     sampleCount = 4000, spawnT = 0, groundMargin = 1600, surfaceNodes = null,
+    profile = {},
   } = {}) {
     super();
 
@@ -90,6 +116,9 @@ export class Track extends THREE.Group {
     // node materials, because NodeMaterial never runs `onBeforeCompile`.
     this._surfaceNodes = surfaceNodes;
     this._hint = 0;
+    this._wheelHint = 0;
+    this._propHint = 0;
+    this._profile = profile;
 
     this._build();
   }
@@ -98,6 +127,58 @@ export class Track extends THREE.Group {
     const result = this.centerline.query(x, z, this._hint);
     this._hint = result.index;
     return result;
+  }
+
+  /**
+   * Per-wheel surface query: height, normal, friction and roughness at a world
+   * point, written into `out`.
+   *
+   * This is the interface the kernel samples four times a step, so it allocates
+   * nothing and keeps its own hint cursor separate from `query`'s — the four
+   * wheels are within two metres of each other, and sharing a cursor with the
+   * chassis query made every wheel walk the ring from wherever the chassis last
+   * looked.
+   *
+   * The normal comes from central differences of the same height function, so the
+   * surface the tyre feels and the surface it is standing on are the same surface
+   * by construction rather than by agreement.
+   */
+  queryWheel(x, z, out) {
+    const q = this.centerline.query(x, z, this._wheelHint);
+    this._wheelHint = q.index;
+    out.surface = q.surface;
+    out.mu = MU[q.surface] ?? MU.grass;
+    out.height = surfaceHeight(q, this.centerline.length, this._profile);
+    out.roughness = surfaceRoughness(q, this._profile);
+    out.curvature = verticalCurvature(
+      q.t, this.centerline.length, this._profile.elevation);
+
+    // Gradient by central difference along the tangent and the normal. `EPS` is a
+    // compromise: too small and float64 cancellation shows up in the normal, too
+    // large and a kerb edge is smeared into a ramp.
+    const t = q.tangent;
+    const n = q.normal;
+    const hAlong = this._heightAt(x + t.x * NORMAL_EPS, z + t.z * NORMAL_EPS)
+      - this._heightAt(x - t.x * NORMAL_EPS, z - t.z * NORMAL_EPS);
+    const hAcross = this._heightAt(x + n.x * NORMAL_EPS, z + n.z * NORMAL_EPS)
+      - this._heightAt(x - n.x * NORMAL_EPS, z - n.z * NORMAL_EPS);
+    const gAlong = hAlong / (2 * NORMAL_EPS);
+    const gAcross = hAcross / (2 * NORMAL_EPS);
+    // Horizontal components of the upward normal, in world XZ.
+    out.nx = -(gAlong * t.x + gAcross * n.x);
+    out.nz = -(gAlong * t.z + gAcross * n.z);
+    return out;
+  }
+
+  /** Surface height at a world point. The one function everything agrees on. */
+  _heightAt(x, z) {
+    const q = this.centerline.query(x, z, this._wheelHint);
+    return surfaceHeight(q, this.centerline.length, this._profile);
+  }
+
+  /** Surface height at a world point, for the renderer and for tests. */
+  heightAt(x, z) {
+    return this._heightAt(x, z);
   }
 
   spawn() {
@@ -128,14 +209,20 @@ export class Track extends THREE.Group {
       s => -(s.halfWidth + s.runoff),
       layered(this._grassMaterial(), 'runoff'),
       Y_RUNOFF,
-      { uvMode: 'metres', tileMetres: GRASS_RUNOFF_TILE_M, receiveShadow: true }
+      {
+        uvMode: 'metres', tileMetres: GRASS_RUNOFF_TILE_M, receiveShadow: true,
+        lateralSegments: RUNOFF_SEGMENTS,
+      }
     ));
     this.add(this._ribbon(
       s => s.halfWidth,
       s => -s.halfWidth,
       layered(this._asphaltMaterial(), 'asphalt'),
       Y_ASPHALT,
-      { uvMode: 'metres', tileMetres: ASPHALT_TILE_M, receiveShadow: true, surfaceUv: true }
+      {
+        uvMode: 'metres', tileMetres: ASPHALT_TILE_M, receiveShadow: true,
+        surfaceUv: true, lateralSegments: ASPHALT_SEGMENTS,
+      }
     ));
 
     const curbMaterial = layered(new THREE.MeshStandardMaterial({
@@ -159,8 +246,11 @@ export class Track extends THREE.Group {
         s => side * (s.halfWidth + (side > 0 ? KERB_WIDTH : 0)),
         s => side * (s.halfWidth + (side > 0 ? 0 : KERB_WIDTH)),
         curbMaterial,
-        Y_KERB,
-        { receiveShadow: true }
+        0,
+        // Kerb height is in the surface function, so it needs enough lateral
+        // subdivision to show the ramp and the serrations rather than a flat slab
+        // floating at a constant offset.
+        { receiveShadow: true, lateralSegments: KERB_SEGMENTS }
       ));
       this.add(this._ribbon(
         s => side * (s.halfWidth - EDGE_LINE_WIDTH) + EDGE_LINE_WIDTH,
@@ -187,14 +277,22 @@ export class Track extends THREE.Group {
 
     this.add(this._startLine(this.samples[this._spawnIndex()], layered(this._lineWearMaterial(), 'marking')));
 
-    const grass = createGrassTufts(this.centerline, Y_RUNOFF, {
+    // Everything trackside stands on ground that now moves, so each of these gets
+    // the surface height at its own position rather than a single plane.
+    const groundMean = meanElevation(this._profile.elevation);
+    const groundAt = (x, z) => {
+      const q = this.centerline.query(x, z, this._propHint);
+      this._propHint = q.index;
+      return groundFieldHeight(q, this.centerline.length, this._profile, groundMean);
+    };
+    const grass = createGrassTufts(this.centerline, (x, z) => groundAt(x, z) + Y_RUNOFF, {
       // Keep the kerb constant in one place; the scatter only knows the number.
       plan: { edgeInset: KERB_WIDTH + 0.25 },
       surfaceNodes: this._surfaceNodes,
     });
     grass.name = 'grassTufts';
-    const fence = createCatchFence(this.centerline);
-    const props = createTracksideProps(this.centerline);
+    const fence = createCatchFence(this.centerline, groundAt);
+    const props = createTracksideProps(this.centerline, groundAt);
     this._tracksideLOD = createTracksideLOD({ grass, fence, props });
     this.add(this._tracksideLOD.root);
   }
@@ -209,6 +307,14 @@ export class Track extends THREE.Group {
    * A plane centred at (0,0) left its edge only ~1 km from the east side of the
    * track — inside fog range, so the world visibly stopped.
    */
+  /**
+   * The ground beyond the circuit.
+   *
+   * A subdivided grid rather than a plane, because with the circuit spanning 12 m
+   * of elevation a flat ground plane is not an option — the track passes several
+   * metres under it at the low points and several metres over it at the high ones,
+   * and both read as the world being broken.
+   */
   _ground() {
     const b = this.bounds();
     const m = this.groundMargin;
@@ -218,11 +324,29 @@ export class Track extends THREE.Group {
       repeatU: width / GRASS_GROUND_TILE_M,
       repeatV: depth / GRASS_GROUND_TILE_M,
     }), 'ground');
-    const geometry = new THREE.PlaneGeometry(width, depth);
+    const geometry = new THREE.PlaneGeometry(
+      width, depth, GROUND_SEGMENTS, GROUND_SEGMENTS);
+    // Built in the XY plane then rotated, so displace Z before the rotation.
+    const cx = (b.minX + b.maxX) / 2;
+    const cz = (b.minZ + b.maxZ) / 2;
+    const pos = geometry.attributes.position;
+    const lap = this.centerline.length;
+    const mean = meanElevation(this._profile.elevation);
+    let hint = 0;
+    for (let i = 0; i < pos.count; i++) {
+      // The plane's local +y becomes world −z after the −90° X rotation.
+      const wx = cx + pos.getX(i);
+      const wz = cz - pos.getY(i);
+      const q = this.centerline.query(wx, wz, hint);
+      hint = q.index;
+      pos.setZ(i, groundFieldHeight(q, lap, this._profile, mean) + Y_GRASS);
+    }
+    pos.needsUpdate = true;
+    geometry.computeVertexNormals();
     if (material.normalMap) geometry.computeTangents();
     const ground = new THREE.Mesh(geometry, material);
     ground.rotation.x = -DEG90;
-    ground.position.set((b.minX + b.maxX) / 2, Y_GRASS, (b.minZ + b.maxZ) / 2);
+    ground.position.set(cx, 0, cz);
     ground.receiveShadow = true;
     return ground;
   }
@@ -433,38 +557,55 @@ export class Track extends THREE.Group {
    * so `u * lapLength` is distance in metres — which is what lets the marking
    * textures be sized in metres.
    */
+  /**
+   * A strip along the centreline between two lateral offsets.
+   *
+   * `lateralSegments` subdivides across the width. It used to be fixed at one — two
+   * vertices per station, left edge and right edge — which is exactly enough for a
+   * flat ribbon and not enough for a surface: a 1.5% drainage crown needs a vertex
+   * in the middle to exist at all, and so does a bump. One is still the default,
+   * because the thin marking strips are only centimetres wide and gain nothing.
+   *
+   * Vertex Y comes from `elevation.surfaceHeight`, the same function the tyre is
+   * standing on. That is deliberate and it is the whole point: a visual bump the
+   * car cannot feel is worse than no bump, and a kerb the car drives through is
+   * worse than a flat one.
+   */
   _ribbon(leftOffset, rightOffset, material, y, {
     uvMode = 'normalized',
     tileMetres = 1,
     receiveShadow = false,
     castShadow = false,
     surfaceUv = false,
+    lateralSegments = 1,
+    followSurface = true,
   } = {}) {
     const n = this.samples.length;
     const lap = this.centerline.length;
-    const vertices = new Float32Array((n + 1) * 6);
-    const normals = new Float32Array((n + 1) * 6);
-    const uvs = new Float32Array((n + 1) * 4);
+    const cols = lateralSegments + 1;
+    const rows = n + 1;
+    const vertices = new Float32Array(rows * cols * 3);
+    const normals = new Float32Array(rows * cols * 3);
+    const uvs = new Float32Array(rows * cols * 2);
     // Un-tiled position on the surface: x round the lap, y across the width.
     // The regular `uv` tiles every few metres to carry aggregate, so it cannot
     // also address a feature that spans the whole circuit.
-    const surface = surfaceUv ? new Float32Array((n + 1) * 4) : null;
-    const indices = new Uint32Array(n * 6);
+    const surface = surfaceUv ? new Float32Array(rows * cols * 2) : null;
+    const indices = new Uint32Array(n * lateralSegments * 6);
 
-    for (let i = 0; i <= n; i++) {
+    const heightAtStation = (s, lateral) => (followSurface
+      ? surfaceHeight(
+        {
+          t: s.t, lateral, halfWidth: s.halfWidth,
+          wallLimit: s.halfWidth + s.runoff,
+        },
+        lap, this._profile)
+      : 0);
+
+    for (let i = 0; i < rows; i++) {
       const s = this.samples[i % n];
       const left = leftOffset(s);
       const right = rightOffset(s);
-      const vertex = i * 6;
-      vertices[vertex] = s.x + s.nx * left;
-      vertices[vertex + 1] = 0;
-      vertices[vertex + 2] = s.z + s.nz * left;
-      vertices[vertex + 3] = s.x + s.nx * right;
-      vertices[vertex + 4] = 0;
-      vertices[vertex + 5] = s.z + s.nz * right;
-      // The strip is flat, so skip computeVertexNormals and its seam artefacts.
-      normals[vertex + 1] = 1;
-      normals[vertex + 4] = 1;
       const uv = ribbonTileUV({
         mode: uvMode,
         alongMetres: (i / n) * lap,
@@ -474,30 +615,64 @@ export class Track extends THREE.Group {
         station: i,
         stationCount: n,
       });
-      uvs[i * 4] = uv.u0;
-      uvs[i * 4 + 1] = uv.v0;
-      uvs[i * 4 + 2] = uv.u1;
-      uvs[i * 4 + 3] = uv.v1;
-      if (surface) {
-        const along = i / n;
-        // v = 1 at the `left` edge, 0 at the `right` one, matching the map's
-        // lateral axis which runs -1 .. +1 across the racing surface.
-        surface[i * 4] = along;
-        surface[i * 4 + 1] = 1;
-        surface[i * 4 + 2] = along;
-        surface[i * 4 + 3] = 0;
+      for (let c = 0; c < cols; c++) {
+        const f = c / lateralSegments;         // 0 at `left`, 1 at `right`
+        const lateral = left + (right - left) * f;
+        const base = (i * cols + c) * 3;
+        vertices[base] = s.x + s.nx * lateral;
+        vertices[base + 1] = heightAtStation(s, lateral);
+        vertices[base + 2] = s.z + s.nz * lateral;
+
+        // Normals analytically from the height field rather than from
+        // computeVertexNormals, which seams at the lap join and at every strip
+        // edge. Gradient along the tangent and across the normal, then the upward
+        // normal is (-g_along·t - g_across·n, 1).
+        if (followSurface) {
+          const dAlong = 0.75;
+          const dLat = 0.25;
+          const tNext = (s.t + dAlong / lap + 1) % 1;
+          const tPrev = (s.t - dAlong / lap + 1) % 1;
+          const wall = s.halfWidth + s.runoff;
+          const at = (t, lat) => surfaceHeight(
+            { t, lateral: lat, halfWidth: s.halfWidth, wallLimit: wall },
+            lap, this._profile);
+          const gAlong = (at(tNext, lateral) - at(tPrev, lateral)) / (2 * dAlong);
+          const gAcross = (at(s.t, lateral + dLat) - at(s.t, lateral - dLat)) / (2 * dLat);
+          const nxv = -(gAlong * s.tx + gAcross * s.nx);
+          const nzv = -(gAlong * s.tz + gAcross * s.nz);
+          const len = Math.hypot(nxv, 1, nzv) || 1;
+          normals[base] = nxv / len;
+          normals[base + 1] = 1 / len;
+          normals[base + 2] = nzv / len;
+        } else {
+          normals[base + 1] = 1;
+        }
+
+        uvs[(i * cols + c) * 2] = uv.u0 + (uv.u1 - uv.u0) * f;
+        uvs[(i * cols + c) * 2 + 1] = uv.v0 + (uv.v1 - uv.v0) * f;
+        if (surface) {
+          // v = 1 at the `left` edge, 0 at the `right` one, matching the map's
+          // lateral axis which runs -1 .. +1 across the racing surface.
+          surface[(i * cols + c) * 2] = i / n;
+          surface[(i * cols + c) * 2 + 1] = 1 - f;
+        }
       }
     }
 
+    let index = 0;
     for (let i = 0; i < n; i++) {
-      const a = i * 2;
-      const index = i * 6;
-      indices[index] = a;
-      indices[index + 1] = a + 2;
-      indices[index + 2] = a + 1;
-      indices[index + 3] = a + 1;
-      indices[index + 4] = a + 2;
-      indices[index + 5] = a + 3;
+      for (let c = 0; c < lateralSegments; c++) {
+        const a = i * cols + c;
+        const b = a + 1;
+        const d = (i + 1) * cols + c;
+        const e = d + 1;
+        indices[index++] = a;
+        indices[index++] = d;
+        indices[index++] = b;
+        indices[index++] = b;
+        indices[index++] = d;
+        indices[index++] = e;
+      }
     }
 
     const geometry = new THREE.BufferGeometry();
@@ -547,6 +722,7 @@ export class Track extends THREE.Group {
     const indices = new Uint32Array(n * faces.length * 6);
     let vi = 0;
 
+    const lap = this.centerline.length;
     for (let i = 0; i < rings; i++) {
       const s = this.samples[i % n];
       const wallLimit = s.halfWidth + s.runoff;
@@ -554,11 +730,19 @@ export class Track extends THREE.Group {
       const cz = s.z + s.nz * side * wallLimit;
       // "Inward" is back toward the centerline, whichever side this run is on.
       const inX = -side * s.nx, inZ = -side * s.nz;
+      // Barriers stand on the ground, and the ground now moves. Left at a fixed
+      // y = 0 they float several metres clear at Abbey and are buried at Village.
+      const base = surfaceHeight(
+        {
+          t: s.t, lateral: side * wallLimit, halfWidth: s.halfWidth,
+          wallLimit,
+        },
+        lap, this._profile);
 
       for (const face of faces) {
         for (const [offset, y] of [face.a, face.b]) {
           vertices[vi] = cx + inX * offset;
-          vertices[vi + 1] = y;
+          vertices[vi + 1] = base + y;
           vertices[vi + 2] = cz + inZ * offset;
           if (face.normal === 'up') {
             normals[vi + 1] = 1;
