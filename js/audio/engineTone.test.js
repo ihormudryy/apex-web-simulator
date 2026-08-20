@@ -7,11 +7,15 @@ import {
   SLEW_UP_RPM_S, SLEW_DOWN_RPM_S, SLEW_SHIFT_RPM_S, SHIFT_WINDOW_S,
 } from './engineTone.js';
 
-test('the modelled engine is the V8 the on-screen car has', () => {
-  // The car is a 2010-spec machine; a four-stroke V8 fires four times per rev.
-  assert.equal(CYLINDERS, 8);
-  assert.equal(firingHz(15000), 1000);
-  assert.equal(firingHz(6000), 400);
+test('the modelled engine is the 1.6 V6 turbo hybrid the physics is', () => {
+  // Was the 2010 mesh's V8. The plan's recommendation is explicit: keep the mesh,
+  // adopt modern physics wholesale, switch the voice. Firing order is
+  // cylinders/2, so this moves the dominant component from 4th order to 3rd — at
+  // 12 000 rpm, 600 Hz rather than 800 — and every exhaust harmonic with it.
+  assert.equal(CYLINDERS, 6);
+  const firing = CYLINDERS / 2;
+  assert.equal(firingHz(15000), (15000 / 60) * firing);
+  assert.equal(firingHz(12000), 600);
 });
 
 test('the wave fundamental gives half-order resolution', () => {
@@ -38,11 +42,16 @@ test('the firing order dominates the spectrum', () => {
 
 test('the spectrum has content between the firing harmonics, not just at them', () => {
   // Pure firing harmonics is an organ; the floor and half orders are the growl.
+  //
+  // Expressed in firing orders rather than in numbers: 2 and 6 were the half and
+  // 1.5x orders of a V8, and stating them as literals meant the test asserted the
+  // V8 rather than the engine.
   const spectrum = engineOrderSpectrum();
-  const between = spectrum[orderIndex(4.5)];
+  const firing = CYLINDERS / 2;
+  const between = spectrum[orderIndex(firing * 1.25 + 0.25)];
   assert.ok(between > 0.005, `no inter-order content: ${between}`);
-  assert.ok(spectrum[orderIndex(2)] > 0.1, 'half-firing growl missing');
-  assert.ok(spectrum[orderIndex(6)] > 0.1, '1.5x firing content missing');
+  assert.ok(spectrum[orderIndex(firing / 2)] > 0.1, 'half-firing growl missing');
+  assert.ok(spectrum[orderIndex(firing * 1.5)] > 0.1, '1.5x firing content missing');
 });
 
 test('load makes it louder and brighter at the same revs', () => {
