@@ -186,8 +186,13 @@ export function createTelemetry({
       throttle: Math.abs(pedals.throttle),
       brake: pedals.brake ? 1 : 0,
       reversing: pedals.throttle < 0,
-      // -1 full left, +1 full right. `steerAngle` is positive to the left.
-      steer: -v.steerAngle / MAX_STEER,
+      // -1 full left, +1 full right, as a fraction of the lock available at this
+      // speed. Dividing the angle by the lock AT REST instead meant the readout
+      // could never pass 0.4 at 150 km/h however hard the wheel was turned, which
+      // is a steering display that lies about the steering.
+      // `steerSmooth` is already -1 for a left turn and +1 for a right one, which
+      // is the convention this readout wants — negating it inverted the display.
+      steer: v.steerSmooth,
 
       latG,
       longG,

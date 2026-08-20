@@ -12,9 +12,16 @@
 		<script type="module">
 		// WebGPURenderer must share the same `three` build as every Texture and
 		// Material. The WebGL path keeps three.module.js (CSM/EffectComposer need
-		// ShaderChunk); `?renderer=webgpu` swaps the import map before boot.
+		// ShaderChunk). Default is WebGPU; `?renderer=` overrides localStorage
+		// (`helloracer.renderer`). Import map must be set before modules load.
 		const CDN = 'https://cdn.jsdelivr.net/npm/three@0.185.1';
-		const webgpu = new URLSearchParams(location.search).get('renderer') === 'webgpu';
+		const param = new URLSearchParams(location.search).get('renderer');
+		let stored = null;
+		try { stored = localStorage.getItem('helloracer.renderer'); } catch (_) { /* */ }
+		const mode = (param === 'webgpu' || param === 'webgl')
+			? param
+			: (stored === 'webgpu' || stored === 'webgl') ? stored : 'webgpu';
+		const webgpu = mode === 'webgpu';
 		const importmap = {
 			imports: {
 				three: `${CDN}/build/${webgpu ? 'three.webgpu.js' : 'three.module.js'}`,

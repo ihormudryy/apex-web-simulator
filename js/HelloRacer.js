@@ -19,7 +19,7 @@ import {
   directionFromEquirectUV, sunDirectionFromEquirect, horizonColorFromEquirect,
 } from './render/equirect.js';
 import { outdoorSkyData, DEFAULT_SUN_U, DEFAULT_SUN_V } from './render/outdoorSky.js';
-import { createRendererBackend, wantsWebGpuRenderer } from './render/rendererBackend.js';
+import { createRendererBackend, setRendererPreferenceAndReload, wantsWebGpuRenderer } from './render/rendererBackend.js';
 import {
   followDirectionalSun,
   HEMISPHERE_INTENSITY,
@@ -422,6 +422,9 @@ class HelloRacer {
       backend,
       initial,
       onChange: (key, value) => this._onRenderPanelChange(key, value),
+      onWebGpuChange: (enabled) => {
+        setRendererPreferenceAndReload(enabled ? 'webgpu' : 'webgl');
+      },
     });
   }
 

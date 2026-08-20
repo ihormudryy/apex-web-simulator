@@ -28,10 +28,17 @@ export const MEASURE_DT = 1 / 120;
 /**
  * Steering available at a given speed — the car limits lock as speed rises, so a
  * limit measurement must not command more than the driver could.
+ *
+ * Re-exported from `driver.js` rather than defined again here. It was a second
+ * copy of the same formula, and a second copy of a constant is how the friction
+ * coefficient ended up wrong in two places at once — a measurement harness that
+ * sweeps to a different lock than the car offers is measuring a different car.
  */
-export function maxSteerAt(speedMs) {
-  return (18 - 12 * clamp(speedMs / 80, 0, 1)) * DEG2RAD;
-}
+// Imported as well as re-exported: `export ... from` does not bring the binding
+// into this module's scope, and `measurePeakLateral` uses it directly.
+import { maxSteerAt, MAX_STEER_DEG } from './driver.js';
+
+export { maxSteerAt, MAX_STEER_DEG };
 
 export const REFERENCE = [
   { id: 'accel-100', label: '0–100 km/h', unit: 's', target: 2.6, tol: 0.30 },
@@ -128,7 +135,26 @@ export function measurePeakLateral(sim, speedKmh, {
   hold = 5.0, steps = 40, window = 1.0, tolerateFailures = 1,
 } = {}) {
   const vTarget = speedKmh / 3.6;
-  const lock = maxSteerAt(vTarget);
+  /**
+   * Swept to the MECHANICAL lock, not the speed-dependent lock the driver is
+   * given.
+   *
+   * This used `maxSteerAt`, on the reasoning that a limit measurement should not
+   * command more than the driver could. That conflates two different things: the
+   * speed-dependent lock is a *steering interface* choice, and peak lateral
+   * acceleration is a property of the *car*. Measuring the car through a narrowed
+   * interface understates the car — and it made the figure move when the interface
+   * was retuned, which is a measurement that tracks the wrong thing.
+   *
+   * It matters most at the top of the range, where the response is double-humped
+   * and nearly flat: at 290 km/h the car makes 3.67 g at 2.4 deg and 3.72 g at
+   * 4.8 deg, so which hump the sweep can reach moves the answer by 4.6% for no
+   * change in the car at all.
+   *
+   * The spin rejection below is what keeps this honest — the sweep still refuses
+   * any angle the car cannot actually hold.
+   */
+  const lock = MAX_STEER_DEG * DEG2RAD;
   let best = 0;
   let note = 'no stable cornering state';
   let failures = 0;

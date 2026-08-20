@@ -104,7 +104,42 @@ function slipOf(S, wheel, vLong) {
  */
 export const MAX_STEER_DEG = 18;
 export const STEER_RATE = 2.5;
-export const STEER_SPEED_FADE = 12;
+
+/**
+ * How the available lock falls with speed.
+ *
+ * This was a straight line — `18 − 12·(v/80)` — and it was wrong in both
+ * directions, which is a hard fault to spot because the two symptoms feel like
+ * different problems.
+ *
+ * Measured against the angle the car can actually use (the steer at which it
+ * reaches its best sustained lateral acceleration):
+ *
+ *     km/h    usable    old lock    ratio
+ *       40     28.5        16.3      0.57   starved
+ *       60     16.0        15.5      0.97   starved
+ *      100      9.2        13.8      1.50
+ *      150      6.4        11.8      1.84
+ *      250      2.8         7.6      2.71   most of the wheel is scrub
+ *
+ * Past the usable angle the front tyre is beyond its peak slip, so **more
+ * steering gives less yaw and more drag**: at 150 km/h the yaw rate peaked at
+ * 5.9° and fell from 0.574 to 0.471 rad/s by full lock. Half the wheel's travel
+ * was taking rotation away. That is what "smooth steering drags the car through
+ * the corner" is.
+ *
+ * The usable angle goes as `v^-1.25` across the whole measured range — a fit, not
+ * a derivation: the Ackermann term falls as `v²` while the achievable lateral
+ * acceleration rises with downforce, and the exponent is what those two leave.
+ * `577` is the coefficient that lands the curve on the measurements.
+ *
+ * `STEER_LOCK_MARGIN` is deliberate over-range. A car that cannot be made to
+ * understeer drives itself, so the driver must be able to ask for more than the
+ * tyres will give — but it should be a margin, not most of the travel.
+ */
+export const STEER_LOCK_COEFF = 577;
+export const STEER_LOCK_EXPONENT = 1.25;
+export const STEER_LOCK_MARGIN = 1.3;
 
 export function steerRamp(state, left, right, vLong, dt) {
   const rate = STEER_RATE * dt;
@@ -123,9 +158,16 @@ export function steerRamp(state, left, right, vLong, dt) {
   return state.angle;
 }
 
-/** Steering lock available at a speed, radians. */
+/**
+ * Steering lock available at a speed, radians.
+ *
+ * Capped at the mechanical limit, which is what binds below about 70 km/h. Being
+ * geometry-limited in a slow hairpin is correct rather than a fault — the real car
+ * is too, which is why Monaco needs a different rack.
+ */
 export function maxSteerAt(speedMs) {
-  return (MAX_STEER_DEG - STEER_SPEED_FADE * clamp(speedMs / 80, 0, 1)) * Math.PI / 180;
+  const usable = STEER_LOCK_COEFF / Math.max(Math.abs(speedMs), 1) ** STEER_LOCK_EXPONENT;
+  return Math.min(MAX_STEER_DEG, STEER_LOCK_MARGIN * usable) * Math.PI / 180;
 }
 
 export function createSteerState() {

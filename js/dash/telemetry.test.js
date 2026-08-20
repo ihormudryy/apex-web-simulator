@@ -216,13 +216,18 @@ test('reverse shows an R rather than first gear', () => {
 });
 
 test('steering reads +1 to the right and -1 to the left', () => {
+  // Posed as `steerSmooth` — the fraction of the lock available at this speed —
+  // because that is what the readout now reports. Dividing the road-wheel ANGLE by
+  // the lock at rest meant a display that could not pass 0.4 at 150 km/h however
+  // hard the wheel was turned, once the lock curve stopped being a straight line.
   const telemetry = createTelemetry({ lapLength: LAP });
   const track = fakeTrack();
-  const maxSteer = 18 * Math.PI / 180;
-  const left = telemetry.sample(fakeCar({ vehicle: { steerAngle: maxSteer } }), track, DT);
-  const right = telemetry.sample(fakeCar({ vehicle: { steerAngle: -maxSteer } }), track, DT);
+  const left = telemetry.sample(fakeCar({ vehicle: { steerSmooth: -1 } }), track, DT);
+  const right = telemetry.sample(fakeCar({ vehicle: { steerSmooth: 1 } }), track, DT);
+  const centre = telemetry.sample(fakeCar({ vehicle: { steerSmooth: 0 } }), track, DT);
   assert.ok(Math.abs(left.steer + 1) < 1e-9, `left read ${left.steer}`);
   assert.ok(Math.abs(right.steer - 1) < 1e-9, `right read ${right.steer}`);
+  assert.ok(Math.abs(centre.steer) < 1e-9, `centre read ${centre.steer}`);
 });
 
 test('peak g holds above the instantaneous value, then bleeds away', () => {

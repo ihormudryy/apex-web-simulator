@@ -47,7 +47,7 @@ export function clamp01(v) {
 /**
  * @param {'webgl' | 'webgpu'} [backend]
  */
-export function defaultRenderValues(backend = 'webgl') {
+export function defaultRenderValues(backend = 'webgpu') {
   const hemi = HEMISPHERE_INTENSITY[backend] ?? HEMISPHERE_INTENSITY.webgl;
   const rim = RIM_INTENSITY[backend] ?? RIM_INTENSITY.webgl;
   return {

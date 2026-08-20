@@ -186,12 +186,15 @@ export class RenderPanel {
    * @param {'webgl' | 'webgpu'} [options.backend]
    * @param {Partial<RenderValues>} [options.initial]
    * @param {(key: string, value: number | boolean, values: RenderValues) => void} [options.onChange]
+   * @param {(enabled: boolean) => void} [options.onWebGpuChange] — persists + reload; cannot hot-swap Three
    */
-  constructor(container, { backend = 'webgl', initial = {}, onChange } = {}) {
+  constructor(container, { backend = 'webgpu', initial = {}, onChange, onWebGpuChange } = {}) {
     injectStyleOnce();
     this._onChange = onChange ?? (() => {});
+    this._onWebGpuChange = onWebGpuChange ?? (() => {});
+    this._backend = backend === 'webgpu' ? 'webgpu' : 'webgl';
     this._values = sanitizeRenderValues({
-      ...defaultRenderValues(backend),
+      ...defaultRenderValues(this._backend),
       ...initial,
     });
     this._open = false;
@@ -213,6 +216,12 @@ export class RenderPanel {
     this._head.addEventListener('click', () => this.toggle());
 
     this._body = el('div', 'rpanel__body');
+
+    const backendSection = el('div', 'rpanel__section');
+    backendSection.append(el('div', 'rpanel__section-label', 'Backend'));
+    backendSection.append(this._makeWebGpuToggle());
+    backendSection.append(el('div', 'rpanel__hint', 'Reload required to switch Three build'));
+    this._body.append(backendSection);
 
     const lightSection = el('div', 'rpanel__section');
     lightSection.append(el('div', 'rpanel__section-label', 'Lighting'));
@@ -337,6 +346,19 @@ export class RenderPanel {
     });
     wrap.append(input, document.createTextNode(`${label} (${hint})`));
     this._toggles.set(key, input);
+    return wrap;
+  }
+
+  _makeWebGpuToggle() {
+    const wrap = el('label', 'rpanel__toggle');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = this._backend === 'webgpu';
+    input.addEventListener('change', () => {
+      this._onWebGpuChange(input.checked);
+    });
+    wrap.append(input, document.createTextNode('WebGPU'));
+    this._webGpuInput = input;
     return wrap;
   }
 }

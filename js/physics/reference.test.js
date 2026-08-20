@@ -4,6 +4,7 @@ import {
   REFERENCE, runReference, maxSteerAt, measureAcceleration, measureBraking,
   measureTopSpeed, measurePeakLateral, measureDownforce,
 } from './reference.js';
+import { MAX_STEER_DEG } from './driver.js';
 
 /**
  * A car whose answers are known on paper, so the measuring code can be checked
@@ -78,10 +79,18 @@ test('a spin is not reported as grip', () => {
 });
 
 test('steering lock falls with speed, and the sweep respects it', () => {
-  const slow = maxSteerAt(0) * 180 / Math.PI;
+  // Properties, not the output of a particular formula. This asserted 6 deg at
+  // 80 m/s, which was the old linear fade restated — so the test had to be edited
+  // to change the curve, which is a test measuring the code rather than the
+  // requirement.
+  const atRest = maxSteerAt(0) * 180 / Math.PI;
   const fast = maxSteerAt(80) * 180 / Math.PI;
-  assert.ok(Math.abs(slow - 18) < 0.01, `${slow} deg at rest`);
-  assert.ok(Math.abs(fast - 6) < 0.01, `${fast} deg at 80 m/s`);
+  assert.ok(
+    Math.abs(atRest - MAX_STEER_DEG) < 0.01,
+    `${atRest} deg at rest, expected the mechanical lock ${MAX_STEER_DEG}`,
+  );
+  assert.ok(fast < atRest * 0.5, `${fast} deg at 80 m/s is not much less than ${atRest}`);
+  assert.ok(fast > 1, `${fast} deg at 80 m/s leaves the car unable to steer at all`);
   // The reported angle must never exceed the lock available at that speed.
   const r = measurePeakLateral(toySim(), 290);
   const used = Number(/([\d.]+) deg of/.exec(r.note)?.[1] ?? 0);

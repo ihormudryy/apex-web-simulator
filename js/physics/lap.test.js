@@ -12,6 +12,7 @@ import {
   telemetryOf,
 } from './vehicle.js';
 import { WB, MU } from './constants.js';
+import { maxSteerAt } from './driver.js';
 import {
   surfaceHeight, surfaceRoughness, verticalCurvature,
 } from '../track/elevation.js';
@@ -117,7 +118,13 @@ function makeDriver({ latG = 1.4, topSpeed = 45, brakeG = 3.0 } = {}) {
     const steer = Math.atan(WB * 2 * Math.sin(err) / dist);
 
     // steerSmooth is negative for a left turn; servo the boolean keys onto it.
-    const want = clamp(-steer / MAX_STEER, -1, 1);
+    //
+    // Normalised by the lock available AT THIS SPEED, not the lock at rest.
+    // `steerSmooth` is a fraction of the current lock, so dividing by the rest
+    // value asked for a road-wheel angle 2.5x smaller than intended at 150 km/h
+    // and the autopilot quietly ran wide. It was always wrong; narrowing the lock
+    // curve is what made it visible.
+    const want = clamp(-steer / maxSteerAt(v), -1, 1);
     input.left = car.steerSmooth > want + 0.02;
     input.right = car.steerSmooth < want - 0.02;
 
