@@ -66,7 +66,7 @@ export class Dashboard {
     );
 
     const hint = el('div', 'dash__hint');
-    hint.textContent = 'H hides · Esc resets';
+    hint.textContent = 'H hides HUD';
     this.root.append(hint);
 
     container.appendChild(this.root);
