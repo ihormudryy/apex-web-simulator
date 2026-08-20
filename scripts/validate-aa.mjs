@@ -27,7 +27,13 @@ import { fileURLToPath } from 'node:url';
 import { launchChrome, findChrome, navigateAndSettle, pngToRgba } from '../scratchpad/cdp.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const PAGE = 'http://127.0.0.1:8000/';
+/**
+ * Pinned to the WebGL backend — see validate-visual.mjs. The composer, the
+ * grading pass and TAA are all WebGL-only, so an unpinned run measures whichever
+ * pipeline the browser negotiated rather than the one being compared.
+ */
+const RENDERER = 'webgl';
+const PAGE = `http://127.0.0.1:8000/?renderer=${RENDERER}`;
 const SUPERSAMPLE = 3;
 const C = { pass: '\x1b[32m', off: '\x1b[33m', dim: '\x1b[2m', end: '\x1b[0m' };
 

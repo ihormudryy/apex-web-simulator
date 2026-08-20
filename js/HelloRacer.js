@@ -1014,8 +1014,12 @@ class HelloRacer {
     const head = updateChassisCamera(this._headCam, {
       aLong: sim.aLong,
       aLat: sim.aLat,
-      pitch: sim.pitch + sim.gradeLong,
-      roll: sim.roll + sim.gradeLat,
+      // The chassis attitude already contains the road — the suspension is fed raw
+      // wheel heights and settles parallel to whatever plane it is on. Adding
+      // `gradeLong` doubled the pitch and put the plane fit's per-frame noise into
+      // the camera, which is where a driver would notice it most.
+      pitch: sim.pitch,
+      roll: sim.roll,
       heave: sim.heave,
       roughness: sim.roughness,
       speed: car.speed(),

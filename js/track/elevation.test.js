@@ -383,7 +383,7 @@ test('wheel sample positions rotate with the car', () => {
 // ---------------------------------------------------------------------------
 
 /** A circuit-shaped track with an elevation profile and optional kerbs. */
-function surfaceTrack({ grade = 0, kerbSide = 0, crest = 0 } = {}) {
+function surfaceTrack({ grade = 0, kerbSide = 0, crest = 0, bank = 0 } = {}) {
   return {
     query: () => ({
       surface: 'tarmac', lateral: 0, wallLimit: 1e9, normal: { x: 0, z: 0 },
@@ -393,7 +393,7 @@ function surfaceTrack({ grade = 0, kerbSide = 0, crest = 0 } = {}) {
       out.mu = MU.tarmac;
       // Body forward is -Z at yaw 0, so distance travelled forward is -z.
       const along = -z;
-      out.height = grade * along - crest * along * along
+      out.height = grade * along - crest * along * along + bank * x
         + (kerbSide !== 0 && Math.sign(x) === kerbSide ? KERB_HEIGHT : 0);
       out.roughness = 0;
       out.nx = 0;
@@ -504,4 +504,70 @@ test('cresting a rise unloads the car, with nothing added to make it happen', ()
     overCrest < level * 0.9,
     `a crest only took the load from ${level.toFixed(0)} N to ${overCrest.toFixed(0)} N`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// The chassis attitude already contains the road
+// ---------------------------------------------------------------------------
+
+test('on a steady gradient the chassis sits PARALLEL to the road', () => {
+  // The suspension is fed raw wheel heights, so it settles onto whatever plane it
+  // is on — which means its pitch already *is* the road gradient. Anything that
+  // adds `gradeLong` to `pitch` doubles the slope.
+  //
+  // This is the property that makes that a bug rather than a style choice, and it
+  // is worth pinning: the chassis-height double-count buried the car four metres
+  // under the road, and the same mistake in the rotation drew it pitching twice as
+  // hard as it was, with the plane fit's per-frame noise on top.
+  const car = createCar({});
+  warmUp(car);
+  const grade = 0.03;
+  const track = surfaceTrack({ grade });
+  rebaseToGround(car, track);
+  launch(car, 40);
+  for (let i = 0; i < 600 * 8; i++) {
+    step(car, { throttle: 0.35, brake: 0, steer: 0 }, track, 1 / 600);
+  }
+  const roadPitch = car.out.gradeLong;
+  const chassisPitch = car.suspension.pitch;
+  assert.ok(
+    Math.abs(roadPitch - grade) < 0.004,
+    `the road gradient should be reported as ${grade}, got ${roadPitch.toFixed(4)}`,
+  );
+  // Parallel: the chassis attitude matches the road, so the DIFFERENCE is what a
+  // suspension is doing and it is small.
+  assert.ok(
+    Math.abs(chassisPitch - roadPitch) < 0.012,
+    `chassis at ${(chassisPitch * 180 / Math.PI).toFixed(2)} deg on a road at `
+    + `${(roadPitch * 180 / Math.PI).toFixed(2)} deg — it should be parallel`,
+  );
+  // And the sign matches, so adding them would double rather than cancel.
+  assert.ok(chassisPitch * roadPitch > 0, 'the two must have the same sign');
+});
+
+test('and PARALLEL across a banked road too — but in the OPPOSITE sign convention', () => {
+  // The chassis lies parallel to a banked road as well, but `suspension.roll` is
+  // positive with the right side DOWN while `gradeLat` is dh/dy with y positive
+  // right — so the two are equal and opposite.
+  //
+  // Which makes `gradeLat + roll` cancel rather than double: a second bug in the
+  // same line as the pitch double-count, with the opposite symptom. A car drawn
+  // dead level through a banked corner.
+  const car = createCar({});
+  warmUp(car);
+  const track = surfaceTrack({ grade: 0, bank: 0.025 });
+  rebaseToGround(car, track);
+  launch(car, 40);
+  for (let i = 0; i < 600 * 8; i++) {
+    step(car, { throttle: 0.3, brake: 0, steer: 0 }, track, 1 / 600);
+  }
+  const roadRoll = car.out.gradeLat;
+  const chassisRoll = car.suspension.roll;
+  assert.ok(Math.abs(roadRoll) > 0.01, `the bank must be reported: ${roadRoll}`);
+  assert.ok(
+    Math.abs(chassisRoll + roadRoll) < 0.012,
+    `chassis roll ${chassisRoll.toFixed(4)} should be the negation of the road's `
+    + `${roadRoll.toFixed(4)}`,
+  );
+  assert.ok(chassisRoll * roadRoll < 0, 'the conventions are opposite, so adding them cancels');
 });

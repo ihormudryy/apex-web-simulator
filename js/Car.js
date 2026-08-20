@@ -587,8 +587,29 @@ export class Car {
     // The car used to sit on a plane at y = 0 whatever the track did.
     this.root.position.set(pose.x, sim.chassisY, pose.z);
     this.root.rotation.y = pose.yaw;
-    this.visualRoot.rotation.x = -(sim.gradeLong + sim.pitch);
-    this.visualRoot.rotation.z = sim.gradeLat + sim.roll;
+    /**
+     * The chassis attitude alone. It already contains the road.
+     *
+     * This was `-(gradeLong + pitch)` and `gradeLat + roll`, which is the same
+     * mistake as the chassis-height double-count and in the same line — the height
+     * was fixed and the rotation was not.
+     *
+     * The suspension is fed raw wheel heights, so it settles parallel to whatever
+     * plane it is on: measured over a lap, `correlation(pitch, gradeLong) = 0.946`.
+     * Adding them therefore DOUBLED the pitch — 4.50 degrees drawn where the car
+     * was doing 2.32 — and, worse, `gradeLong` is a fresh plane fit over four
+     * wheels of a bumpy surface every step, so it carries per-frame noise where
+     * `pitch` is a filtered dynamic state. The picture jittered at 0.177 deg per
+     * frame while the car moved at 0.064. That is the "bouncing front to rear like
+     * a cobblestone road" — a smooth car, drawn badly.
+     *
+     * Roll had the opposite bug: `suspension.roll` is positive with the right side
+     * down and `gradeLat` is dh/dy with y positive right, so the two are equal and
+     * opposite and adding them CANCELLED the bank. The car was drawn level through
+     * a banked corner.
+     */
+    this.visualRoot.rotation.x = -sim.pitch;
+    this.visualRoot.rotation.z = -sim.roll;
 
     // Brake glow from disc temperature, which is the same number that sets pad
     // friction. The old version lit the discs from a boolean, so they glowed

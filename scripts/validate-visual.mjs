@@ -25,6 +25,19 @@ import { inflateSync } from 'node:zlib';
 import { launchChrome, findChrome } from '../scratchpad/cdp.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+/**
+ * Pinned to the WebGL backend.
+ *
+ * The page defaults to WebGPU, and the two backends are different pipelines: the
+ * composer, the grading pass and TAA are all WebGL-only, because CSM and
+ * EffectComposer need `ShaderChunk`, which the WebGPU build does not export. Left
+ * unpinned this measured whichever backend the browser happened to negotiate — so
+ * the same code scored 6/8 in one run and 4/8 in the next, and the difference was
+ * the module graph rather than the picture.
+ */
+const RENDERER = 'webgl';
+const PAGE_URL = `http://127.0.0.1:8000/?renderer=${RENDERER}`;
+
 const C = { pass: '\x1b[32m', off: '\x1b[33m', dim: '\x1b[2m', end: '\x1b[0m' };
 const pad = (s, n) => String(s).padEnd(n);
 const padL = (s, n) => String(s).padStart(n);
@@ -173,7 +186,7 @@ async function main() {
     const launched = await launchChrome({ width: 1280, height: 800, gpu: true });
     proc = launched.proc;
     const { cdp } = launched;
-    await cdp.send('Page.navigate', { url: 'http://127.0.0.1:8000/' });
+    await cdp.send('Page.navigate', { url: PAGE_URL });
 
     const booted = await evaluate(cdp, `(async () => {
       const end = performance.now() + 40000;
@@ -190,6 +203,14 @@ async function main() {
       const gl = document.createElement('canvas').getContext('webgl2');
       const dbg = gl && gl.getExtension('WEBGL_debug_renderer_info');
       return dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown';
+    })()`);
+
+    // Which pipeline actually built? The two backends are not comparable, and a
+    // missing composer silently removes grading and TAA from the measurement.
+    const pipeline = await evaluate(cdp, `(() => {
+      const r = window.racer;
+      const passes = (r._composer?.passes ?? []).map(p => p.constructor.name);
+      return r.renderer.constructor.name + (passes.length ? ': ' + passes.join(' -> ') : ': no composer');
     })()`);
 
     // Stop the grass moving, or real motion dominates the jitter comparison.
@@ -271,6 +292,7 @@ async function main() {
     cdp.close();
 
     console.log(`\n  Rendering quality — ${a.width}x${a.height} on ${gpu}`);
+    console.log(`  ${C.dim}backend ${RENDERER}, ${pipeline}${C.end}`);
     console.log(`  ${C.dim}grass wind stopped on ${stilled} material(s) before capture${C.end}`);
     console.log(`  ${C.dim}${'-'.repeat(68)}${C.end}`);
     console.log(`  ${C.dim}${pad('metric', 26)}${padL('measured', 10)}${padL('target', 14)}${C.end}`);
