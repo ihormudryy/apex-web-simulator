@@ -13,6 +13,9 @@ import { cockpitSteerAngle, followSteerAngle } from './render/cockpitSteer.js';
 import {
   createCarEffects, updateCarEffects, updateBrakeGlow,
 } from './render/carEffects.js';
+import {
+  wingWeights, deformBody, wheelCollapse, paintWear, damageSignature,
+} from './render/meshDamage.js';
 import { enableCarParticleSystems } from './render/carParticleBackend.js';
 
 const DEG90 = Math.PI / 2;
@@ -354,10 +357,15 @@ export class Car {
         mesh.receiveShadow = true;
         (p.parent || this.body).add(mesh);
         // Kept for the ghost, which is a clone of buffers already on the GPU
-        // rather than a second load of the same file.
+        // rather than a second load of the same file — and for visible damage,
+        // which deforms this geometry's wing region in place.
         if (name === 'BodyPaint') {
           this._bodyGeometry = geo;
           this._bodyOffset = { x: p.x, y: p.y, z: p.z };
+          this._paintMesh = mesh;
+          const pos = geo.attributes.position;
+          this._paintBase = new Float32Array(pos.array);
+          this._wingRegions = wingWeights(this._paintBase, pos.count);
         }
       });
     }
@@ -441,6 +449,63 @@ export class Car {
   }
 
   /**
+   * Make the damage visible: droop and crumple the wing region of the paint
+   * mesh, collapse damaged wheels onto camber, scuff the paint. Driven by the
+   * same damage state that changes how the car drives, so the mesh, the HUD and
+   * the handling can never disagree about what happened.
+   *
+   * Rebuilt only when the damage signature changes — deforming fifty thousand
+   * vertices per frame for a car that has not been hit again would spend the
+   * frame budget on nothing.
+   */
+  _applyMeshDamage(dmg) {
+    if (!dmg) return;
+    const sig = damageSignature(dmg);
+    if (sig === this._damageSig) return;
+    this._damageSig = sig;
+
+    if (this._paintMesh && this._paintBase) {
+      const pos = this._paintMesh.geometry.attributes.position;
+      deformBody(this._paintBase, pos.array, this._wingRegions, {
+        wing: dmg.wing,
+        left: dmg.wheels[0],
+        right: dmg.wheels[1],
+      });
+      pos.needsUpdate = true;
+      // The droop changes the wing's slopes; stale normals light it as if it
+      // were still straight, which reads as untouched.
+      this._paintMesh.geometry.computeVertexNormals();
+    }
+
+    // Wheel camber collapse. Steering owns rotation.y and the spin pivot owns
+    // its own axis, so the camber lands on rotation.x — the wheels hang off
+    // visualRoot, where +x is the car's forward and z is lateral, making x the
+    // camber axis. "Outward" is the sign of the wheel's own z.
+    const wheels = [this.lfw, this.rfw, this.lrw, this.rrw];
+    for (let i = 0; i < 4; i++) {
+      const w = wheels[i];
+      if (!w) continue;
+      if (w.userData.baseY === undefined) w.userData.baseY = w.position.y;
+      const { camber, lift } = wheelCollapse(dmg.wheels[i]);
+      w.rotation.x = camber * Math.sign(w.position.z || 1);
+      w.position.y = w.userData.baseY + lift;
+    }
+
+    // Paint wear, as multipliers on the pristine values so a reset restores
+    // them exactly.
+    if (this.bodyPaintMat) {
+      const mat = this.bodyPaintMat;
+      if (mat.userData.baseRoughness === undefined) {
+        mat.userData.baseRoughness = mat.roughness;
+        mat.userData.baseClearcoat = mat.clearcoat;
+      }
+      const wear = paintWear(dmg.total);
+      mat.roughness = Math.min(1, mat.userData.baseRoughness * wear.roughnessScale);
+      mat.clearcoat = mat.userData.baseClearcoat * wear.clearcoatScale;
+    }
+  }
+
+  /**
    * Emit and advance the physics-driven effects.
    *
    * Wheel positions come from the kernel's own surface samples, which are already
@@ -509,7 +574,9 @@ export class Car {
       depthWrite: false,
       side: THREE.DoubleSide,
     });
-    const mesh = new THREE.Mesh(this._bodyGeometry, material);
+    // A CLONE, not the live geometry: the live one deforms with damage, and the
+    // ghost is the best lap — a car that was, by definition, not wrecked.
+    const mesh = new THREE.Mesh(this._bodyGeometry.clone(), material);
     const o = this._bodyOffset ?? { x: 0, y: 0, z: 0 };
     mesh.position.set(o.x, o.y, o.z);
     // The same two nested rotations the real car uses, so the ghost sits where the
@@ -628,6 +695,7 @@ export class Car {
     }
 
     this._updateEffects(v, sim, pose, track, dt);
+    this._applyMeshDamage(sim.damage);
 
     // Tyre micro “life”: heat and wear roughness, and a squash from the real
     // corner load. Both used to be modelled here separately from the physics —
