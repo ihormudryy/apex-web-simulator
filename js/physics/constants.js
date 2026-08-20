@@ -12,6 +12,8 @@ export const CDA = 1.55;
 export const CLA = 4.6;
 export const G = 9.81;
 export const H_CG = 0.32;
+/** Track half-width — centre of each tyre from the car centreline [m]. */
+export const TRACK_HALF = 0.8;
 
 export const BRAKE_DEMAND = 30000;
 export const BRAKE_BIAS_FRONT = 0.58;
