@@ -32,10 +32,9 @@ export const DASH_CSS = `
   gap: 10px;
   padding: 14px 14px 0;
   z-index: 150;
-  /* Clear of the material panel, which is fixed at the top right with a higher
-     z-index — the car-state panel was landing underneath it and losing half its
-     readout to something that is not even part of the HUD. */
-  padding-right: 250px;
+  /* Clear of the foldable Render panel (top-right, z-index 200) so the
+     car-state cluster does not land underneath it. */
+  padding-right: 270px;
   /* A readout must never eat the drag-to-orbit controls on the canvas. */
   pointer-events: none;
   font-family: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;

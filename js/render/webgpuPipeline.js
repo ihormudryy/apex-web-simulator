@@ -9,6 +9,7 @@ import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import { sharpen } from 'three/addons/tsl/display/SharpenNode.js';
 import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
 import { setSunLightDirection } from './sunLightDirection.js';
+import { SUN_INTENSITY, SHADOW_INTENSITY } from './lightingBalance.js';
 
 export { setSunLightDirection } from './sunLightDirection.js';
 
@@ -20,7 +21,7 @@ export { setSunLightDirection } from './sunLightDirection.js';
 export function createWebGpuSunLight(THREE, scene, sunDir, {
   maxFar = 1400,
   lightMargin = 80,
-  intensity = 2.2,
+  intensity = SUN_INTENSITY,
   mapSize = 2048,
 } = {}) {
   const sunLight = new THREE.DirectionalLight(0xffffff, intensity);
@@ -30,8 +31,8 @@ export function createWebGpuSunLight(THREE, scene, sunDir, {
   sunLight.shadow.camera.far = maxFar + 200;
   sunLight.shadow.bias = -0.00035;
   sunLight.shadow.normalBias = 0.008;
-  sunLight.shadow.radius = 6;
-  sunLight.shadow.intensity = 0.55;
+  sunLight.shadow.radius = 4;
+  sunLight.shadow.intensity = SHADOW_INTENSITY;
 
   const csm = new CSMShadowNode(sunLight, {
     cascades: 4,

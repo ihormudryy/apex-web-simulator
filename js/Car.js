@@ -13,6 +13,7 @@ import { cockpitSteerAngle, followSteerAngle } from './render/cockpitSteer.js';
 import {
   createCarEffects, updateCarEffects, updateBrakeGlow,
 } from './render/carEffects.js';
+import { enableCarParticleSystems } from './render/carParticleBackend.js';
 
 const DEG90 = Math.PI / 2;
 const clampUnit = v => Math.max(-1, Math.min(1, v));
@@ -22,9 +23,14 @@ const T_TYRE_HOT = 130;
 const STEER_HUB = { x: 0, y: 0.5933, z: 0.5054 };
 
 export class Car {
-  constructor(scene) {
+  /**
+   * @param {THREE.Scene} scene
+   * @param {{ backend?: 'webgl' | 'webgpu' }} [options]
+   */
+  constructor(scene, { backend = 'webgl' } = {}) {
     this.root = new THREE.Object3D();
     scene.add(this.root);
+    this._particles = enableCarParticleSystems(backend);
 
     this.visualRoot = new THREE.Object3D();
     this.visualRoot.rotation.y = DEG90;
@@ -569,7 +575,9 @@ export class Car {
     this._track = track;
     advance(v, this.input, track, dt);
 
-    if (!this._fx) this._fx = createCarEffects(this._scene);
+    if (!this._fx) {
+      this._fx = createCarEffects(this._scene, { particles: this._particles });
+    }
     // Interpolated, not raw: the sim runs at a fixed 600 Hz and the display does
     // not, so drawing the latest state directly shows a step pattern of 10, 10,
     // 11 states per frame that reads as micro-stutter.

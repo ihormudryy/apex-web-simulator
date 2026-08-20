@@ -24,7 +24,7 @@ const STYLE_ID = 'setup-panel-style';
 
 const CSS = `
 .setup {
-  /* Above the dashboard (150) and the material panel (200). A modal that renders
+  /* Above the dashboard (150) and the render panel (200). A modal that renders
      under the HUD it is meant to replace is worse than no modal. */
   position: fixed; inset: 0; z-index: 300;
   display: none; align-items: center; justify-content: center;

@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import Stats from 'three/addons/libs/stats.module.js';
 import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { Car } from './Car.js';
-import { MaterialPanel } from './MaterialPanel.js';
 import { createSilverstone } from './track/Silverstone.js';
+import { RenderPanel } from './render/RenderPanel.js';
+import { defaultRenderValues } from './render/renderPanelState.js';
 import { nextCameraMode, DRIVER_CAMERA, CAMERA_NEAR } from './cameraModes.js';
 import {
   createChassisCamera, updateChassisCamera, speedFov,
@@ -18,8 +19,16 @@ import {
   directionFromEquirectUV, sunDirectionFromEquirect, horizonColorFromEquirect,
 } from './render/equirect.js';
 import { outdoorSkyData, DEFAULT_SUN_U, DEFAULT_SUN_V } from './render/outdoorSky.js';
-import { createRendererBackend } from './render/rendererBackend.js';
-import { setSunLightDirection } from './render/sunLightDirection.js';
+import { createRendererBackend, wantsWebGpuRenderer } from './render/rendererBackend.js';
+import {
+  followDirectionalSun,
+  HEMISPHERE_INTENSITY,
+  RIM_INTENSITY,
+  ENVIRONMENT_INTENSITY,
+  TONE_EXPOSURE,
+  SUN_INTENSITY,
+  SHADOW_INTENSITY,
+} from './render/lightingBalance.js';
 import { EngineAudio } from './audio/EngineAudio.js';
 import {
   setPose, resetVehicle, createVehicle, replayStep, renderPose, telemetryOf,
@@ -115,6 +124,12 @@ class HelloRacer {
     this._csmMaterialSet = new WeakSet();
     this._csmMaterialScanFrames = 120;
     this._bounceLight = null;
+    this._rimLight = null;
+    this._sunIntensity = SUN_INTENSITY;
+    this._shadowIntensity = SHADOW_INTENSITY;
+    this._toneExposure = TONE_EXPOSURE;
+    this._envIntensity = ENVIRONMENT_INTENSITY;
+    this.renderPanel = null;
     this._headCam = createChassisCamera();
     this.setup = null;
     this.setupPanel = null;
@@ -231,9 +246,8 @@ class HelloRacer {
       await this._setupCSMAndPost();
     }
 
+    // FPS lives in the foldable Render panel; keep Stats for its timers only.
     this.stats = new Stats();
-    this.stats.dom.style.cssText = 'position:absolute;top:0;z-index:100';
-    container.appendChild(this.stats.dom);
 
     window.addEventListener('resize', () => this._onResize());
     document.addEventListener('keydown', e => this._onKeyDown(e));
@@ -258,12 +272,12 @@ class HelloRacer {
 
     this._loadEnvironment();
 
-    this.car = new Car(this.scene);
+    this.car = new Car(this.scene, { backend: this._rendererBackend });
     // Materials that explicitly receive `envMap` need it wired in; otherwise
     // dielectrics go unnaturally dark (no ambient IBL).
     this.car.loadAssets(this._envMap);
     this._placeCarOnTrack();
-    new MaterialPanel(this.car.bodyPaintMat);
+    this._mountRenderPanel(container);
 
     this.telemetry = createTelemetry({ lapLength: this.track.centerline.length });
     this.dashboard = new Dashboard(container, this.track, { circuitName: 'Silverstone' });
@@ -343,8 +357,8 @@ class HelloRacer {
     if (this._envMap) this._envMap.dispose();
     this._envMap = env;
     this.scene.environment = env;
-    this.scene.environmentIntensity = 1.0;
-    this.renderer.toneMappingExposure = 1.05;
+    this.scene.environmentIntensity = this._envIntensity;
+    this.renderer.toneMappingExposure = this._toneExposure;
 
     const img = source.image;
     if (img && img.data && img.width && img.height) {
@@ -359,7 +373,7 @@ class HelloRacer {
     if (this._csm?.lightDirection) {
       this._csm.lightDirection.copy(this._sunDir).negate().normalize();
     } else if (this._sunLight) {
-      setSunLightDirection(this._sunLight, this._sunDir);
+      followDirectionalSun(this._sunLight, this._sunDir, this.camera.position);
     }
   }
 
@@ -385,6 +399,139 @@ class HelloRacer {
   }
 
   /**
+   * Foldable lighting / FX overlay. Reflectivity used to live in MaterialPanel;
+   * everything scene-relevant sits here so keys and sliders share one state.
+   */
+  _mountRenderPanel(container) {
+    const backend = this._rendererBackend === 'webgpu' ? 'webgpu' : 'webgl';
+    const initial = {
+      ...defaultRenderValues(backend),
+      ...this._fx,
+      toneExposure: this._toneExposure,
+      envIntensity: this._envIntensity,
+      sunIntensity: this._sunIntensity,
+      shadowIntensity: this._shadowIntensity,
+      hemiIntensity: this._bounceLight?.intensity
+        ?? defaultRenderValues(backend).hemiIntensity,
+      rimIntensity: this._rimLight?.intensity
+        ?? defaultRenderValues(backend).rimIntensity,
+      reflectivity: this.car?.bodyPaintMat?.reflectivity ?? 0.45,
+      aoBlend: this._aoPass?.blendIntensity ?? 0.45,
+    };
+    this.renderPanel = new RenderPanel(container, {
+      backend,
+      initial,
+      onChange: (key, value) => this._onRenderPanelChange(key, value),
+    });
+  }
+
+  _onRenderPanelChange(key, value) {
+    switch (key) {
+      case 'toneExposure':
+        this._toneExposure = value;
+        if (this.renderer) this.renderer.toneMappingExposure = value;
+        break;
+      case 'envIntensity':
+        this._envIntensity = value;
+        if (this.scene) this.scene.environmentIntensity = value;
+        break;
+      case 'sunIntensity':
+        this._sunIntensity = value;
+        this._applySunAndShadow();
+        break;
+      case 'shadowIntensity':
+        this._shadowIntensity = value;
+        this._applySunAndShadow();
+        break;
+      case 'hemiIntensity':
+        if (this._bounceLight) this._bounceLight.intensity = value;
+        break;
+      case 'rimIntensity':
+        if (this._rimLight) this._rimLight.intensity = value;
+        break;
+      case 'reflectivity':
+        if (this.car?.bodyPaintMat) {
+          this.car.bodyPaintMat.reflectivity = value;
+          this.car.bodyPaintMat.needsUpdate = true;
+        }
+        break;
+      case 'aoBlend':
+        if (this._aoPass && this._aoPass.blendIntensity !== undefined) {
+          this._aoPass.blendIntensity = value;
+        }
+        break;
+      case 'ssao':
+        this._setFxSsao(value);
+        break;
+      case 'bounce':
+        this._setFxBounce(value);
+        break;
+      case 'csm':
+        this._setFxCsm(value);
+        break;
+      case 'taa':
+        this._setFxTaa(value);
+        break;
+      case 'grade':
+        this._setFxGrade(value);
+        break;
+      default:
+        break;
+    }
+  }
+
+  _applySunAndShadow() {
+    // WebGL CSM owns an array of cascade DirectionalLights; WebGPU uses one
+    // sun light + CSMShadowNode (no `.lights` list to poke).
+    if (this._rendererBackend === 'webgl' && this._csm?.lights) {
+      for (const light of this._csm.lights) {
+        light.intensity = this._sunIntensity;
+        if (light.shadow) light.shadow.intensity = this._shadowIntensity;
+      }
+      if (this._csm.lightIntensity !== undefined) {
+        this._csm.lightIntensity = this._sunIntensity;
+      }
+    }
+    if (this._sunLight) {
+      this._sunLight.intensity = this._fx.csm ? this._sunIntensity : 0;
+      this._sunLight.shadow.intensity = this._shadowIntensity;
+    }
+  }
+
+  _setFxSsao(on) {
+    this._fx.ssao = Boolean(on);
+    if (this._aoPass?.enabled !== undefined) this._aoPass.enabled = this._fx.ssao;
+    this._setWebGpuAoEnabled(this._fx.ssao);
+    this.renderPanel?.syncFx({ ssao: this._fx.ssao });
+  }
+
+  _setFxBounce(on) {
+    this._fx.bounce = Boolean(on);
+    if (this._bounceLight) this._bounceLight.visible = this._fx.bounce;
+    this.renderPanel?.syncFx({ bounce: this._fx.bounce });
+  }
+
+  _setFxCsm(on) {
+    this._fx.csm = Boolean(on);
+    if (this._sunLight) this._sunLight.castShadow = this._fx.csm;
+    this._applySunAndShadow();
+    this.renderPanel?.syncFx({ csm: this._fx.csm });
+  }
+
+  _setFxTaa(on) {
+    this._fx.taa = Boolean(on);
+    if (this._taaPass) this._taaPass.enabled = this._fx.taa;
+    if (!this._fx.taa && this.camera) this.camera.clearViewOffset();
+    this.renderPanel?.syncFx({ taa: this._fx.taa });
+  }
+
+  _setFxGrade(on) {
+    this._fx.grade = Boolean(on);
+    if (this._gradingPass) this._gradingPass.enabled = this._fx.grade;
+    this.renderPanel?.syncFx({ grade: this._fx.grade });
+  }
+
+  /**
    * Key light is the same sun the HDRI shows, and its shadow frustum is a
    * 80 m square around the car — a map over the whole circuit would be mush.
    * Sky fill comes from `scene.environment`; a weak rim keeps the shaded
@@ -394,16 +541,20 @@ class HelloRacer {
     const sun = directionFromEquirectUV(DEFAULT_SUN_U, DEFAULT_SUN_V);
     this._sunDir.set(sun.x, sun.y, sun.z);
 
-    const rim = new THREE.DirectionalLight(0xbcd8ff, 0.45);
+    const backend = wantsWebGpuRenderer() ? 'webgpu' : 'webgl';
+
+    const rim = new THREE.DirectionalLight(0xbcd8ff, RIM_INTENSITY[backend]);
     rim.position.set(-35, 30, -55);
     this.scene.add(rim);
+    this._rimLight = rim;
 
     // Fill into CSM shadows. AmbientLight was removed — it is flat and stacked
     // badly with hemisphere + IBL. The sun + env map own direct lighting now.
+    // WebGPU fill sits lower so CSMShadowNode casts stay visible.
     this._bounceLight = new THREE.HemisphereLight(
       new THREE.Color(SKY_COLOR),
       new THREE.Color(0x5a5348),
-      0.55,
+      HEMISPHERE_INTENSITY[backend],
     );
     this.scene.add(this._bounceLight);
   }
@@ -427,17 +578,17 @@ class HelloRacer {
       shadowMapSize: 2048,
       shadowBias: -0.00035,
       lightDirection: this._sunDir.clone().negate().normalize(),
-      lightIntensity: 2.2,
+      lightIntensity: SUN_INTENSITY,
       lightNear: 0.5,
       lightFar: FOG_FAR + 200,
       lightMargin: 80,
     });
     for (const light of this._csm.lights) {
-      light.shadow.intensity = 0.55;
+      light.shadow.intensity = SHADOW_INTENSITY;
       // 4 cm of normal bias lifted the painted lines (16–20 mm up) out of the
       // shadow test, so the white stripe stayed fully lit through the car.
       light.shadow.normalBias = 0.008;
-      light.shadow.radius = 6;
+      light.shadow.radius = 4;
     }
 
     // Composer render targets have no MSAA unless asked. The canvas
@@ -473,6 +624,7 @@ class HelloRacer {
     this._aoPass.updatePdMaterial({ samples: 8, rings: 2, radius: 8 });
     this._aoPass.enabled = this._fx.ssao;
     this._composer.addPass(this._aoPass);
+    this._applySunAndShadow();
 
     // TAA before OutputPass, so the accumulation happens in linear HDR. Averaging
     // tone-mapped sRGB values is a different and wrong average.
@@ -519,6 +671,7 @@ class HelloRacer {
     this._sunLight = sunLight;
     this._webgpuCsm = csm;
     this._csm = csm;
+    this._applySunAndShadow();
 
     const post = createWebGpuPost(THREE, this.renderer, this.scene, this.camera);
     this._webgpuPost = post;
@@ -706,10 +859,18 @@ class HelloRacer {
         if (this._csmMaterialScanFrames <= 0) this._csmMaterialsReady = true;
       }
       if (this._fx.csm) this._csm.update();
-    } else if (this._sunLight) {
-      this._sunLight.castShadow = this._fx.csm;
     }
     this._updateCamera(dt);
+
+    if (this._rendererBackend === 'webgpu' && this._sunLight) {
+      // Anchor the sun on the camera so CSM cascades cover the car, not the
+      // world origin kilometres away from Silverstone.
+      followDirectionalSun(this._sunLight, this._sunDir, this.camera.position);
+      this._sunLight.castShadow = this._fx.csm;
+      this._sunLight.intensity = this._fx.csm ? this._sunIntensity : 0;
+      this._sunLight.shadow.intensity = this._shadowIntensity;
+      if (this._webgpuCsm?.camera) this._webgpuCsm.updateFrustums();
+    }
     this.track.updateTracksideLOD(this.camera);
 
     // The jitter has to be in the projection matrix before geometry is drawn, and
@@ -728,6 +889,7 @@ class HelloRacer {
       this.renderer.render(this.scene, this.camera);
     }
     this.stats.update();
+    this.renderPanel?.update(dt);
 
     const snap = this.telemetry.sample(this.car, this.track, dt);
     this._updateGhost(snap, dt);
@@ -1025,40 +1187,23 @@ class HelloRacer {
       return;
     }
     if (e.code === 'KeyG') {
-      if (!e.repeat) {
-        this._fx.grade = !this._fx.grade;
-        if (this._gradingPass) this._gradingPass.enabled = this._fx.grade;
-      }
+      if (!e.repeat) this._setFxGrade(!this._fx.grade);
       return;
     }
     if (e.code === 'KeyT') {
-      if (!e.repeat) {
-        this._fx.taa = !this._fx.taa;
-        if (this._taaPass) this._taaPass.enabled = this._fx.taa;
-        if (!this._fx.taa) this.camera.clearViewOffset();
-      }
+      if (!e.repeat) this._setFxTaa(!this._fx.taa);
       return;
     }
     if (e.code === 'Digit1') {
-      if (!e.repeat) {
-        this._fx.ssao = !this._fx.ssao;
-        if (this._aoPass?.enabled !== undefined) this._aoPass.enabled = this._fx.ssao;
-        this._setWebGpuAoEnabled(this._fx.ssao);
-      }
+      if (!e.repeat) this._setFxSsao(!this._fx.ssao);
       return;
     }
     if (e.code === 'Digit2') {
-      if (this._bounceLight && !e.repeat) {
-        this._fx.bounce = !this._fx.bounce;
-        this._bounceLight.visible = this._fx.bounce;
-      }
+      if (this._bounceLight && !e.repeat) this._setFxBounce(!this._fx.bounce);
       return;
     }
     if (e.code === 'Digit3') {
-      if (!e.repeat) {
-        this._fx.csm = !this._fx.csm;
-        if (this._sunLight) this._sunLight.castShadow = this._fx.csm;
-      }
+      if (!e.repeat) this._setFxCsm(!this._fx.csm);
       return;
     }
     if (e.code === 'KeyC') {

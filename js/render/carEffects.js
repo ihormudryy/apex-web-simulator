@@ -27,6 +27,10 @@ import {
 import { createRing, emit, advance, createBudget, takeBudget } from './particleRing.js';
 import { createMarkBuffer, layMark } from './tyreMarks.js';
 
+import { enableCarParticleSystems } from './carParticleBackend.js';
+
+export { enableCarParticleSystems };
+
 const WHEELS = 4;
 
 // ---------------------------------------------------------------------------
@@ -37,6 +41,8 @@ const WHEELS = 4;
  * `Points` over a `particleRing`, with a soft round sprite generated in the shader
  * rather than sampled from a texture — a 64x64 blob map is a texture upload, a
  * mip chain and a binding for something `smoothstep` does in two instructions.
+ *
+ * WebGL only: see `enableCarParticleSystems`.
  */
 function createParticleSystem({ count, size, color, opacity, gravity, drag, blending, attenuate = true }) {
   const ring = createRing({ count, gravity, drag });
@@ -131,7 +137,23 @@ export function flushMarks(marks) {
 // The whole effect set
 // ---------------------------------------------------------------------------
 
-export function createCarEffects(scene) {
+/**
+ * @param {THREE.Scene} scene
+ * @param {{ particles?: boolean }} [options]
+ *   `particles` defaults to true (WebGL). Pass false on the WebGPU path.
+ */
+export function createCarEffects(scene, { particles = true } = {}) {
+  const marks = createTyreMarkTexture();
+  const empty = {
+    smoke: null,
+    sparks: null,
+    haze: null,
+    marks,
+    _glow: { r: 0, g: 0, b: 0, intensity: 0 },
+    rates: { smoke: 0, sparks: 0, haze: 0 },
+  };
+  if (!particles) return empty;
+
   const smoke = createParticleSystem({
     count: 900,
     size: 26,
@@ -168,9 +190,9 @@ export function createCarEffects(scene) {
     smoke,
     sparks,
     haze,
-    marks: createTyreMarkTexture(),
-    _glow: { r: 0, g: 0, b: 0, intensity: 0 },
-    rates: { smoke: 0, sparks: 0, haze: 0 },
+    marks,
+    _glow: empty._glow,
+    rates: empty.rates,
   };
 }
 
@@ -189,35 +211,38 @@ export function updateCarEffects(fx, c, dt) {
   let smokeTotal = 0;
   let sparkTotal = 0;
   let hazeTotal = 0;
+  const particles = Boolean(fx.smoke);
 
   for (let i = 0; i < WHEELS; i++) {
     const w = wheels[i];
 
-    const rate = smokeRate(sim.slipSpeed[i], sim.fz[i], sim.tyreT[i]);
-    smokeTotal += rate;
-    const puffs = takeBudget(fx.smoke.budget, rate * 90 * dt);
-    for (let k = 0; k < puffs; k++) {
-      // Thrown back from the contact patch at a fraction of road speed, then it
-      // billows: a plume that simply rises is steam, not tyre smoke.
-      emit(
-        fx.smoke.ring, w.x, w.y + 0.1, w.z,
-        (Math.random() - 0.5) * 3 - c.forwardX * speed * 0.06,
-        0.7 + Math.random() * 1.4,
-        (Math.random() - 0.5) * 3 - c.forwardZ * speed * 0.06,
-        0.7 + Math.random() * 0.9,
-        0.5 + Math.random() * 0.9,
-      );
-    }
+    if (particles) {
+      const rate = smokeRate(sim.slipSpeed[i], sim.fz[i], sim.tyreT[i]);
+      smokeTotal += rate;
+      const puffs = takeBudget(fx.smoke.budget, rate * 90 * dt);
+      for (let k = 0; k < puffs; k++) {
+        // Thrown back from the contact patch at a fraction of road speed, then it
+        // billows: a plume that simply rises is steam, not tyre smoke.
+        emit(
+          fx.smoke.ring, w.x, w.y + 0.1, w.z,
+          (Math.random() - 0.5) * 3 - c.forwardX * speed * 0.06,
+          0.7 + Math.random() * 1.4,
+          (Math.random() - 0.5) * 3 - c.forwardZ * speed * 0.06,
+          0.7 + Math.random() * 0.9,
+          0.5 + Math.random() * 0.9,
+        );
+      }
 
-    const h = brakeHaze(sim.brakeT[i], speed);
-    hazeTotal += h;
-    const shimmers = takeBudget(fx.haze.budget, h * 14 * dt);
-    for (let k = 0; k < shimmers; k++) {
-      emit(
-        fx.haze.ring, w.x, w.y + 0.25, w.z,
-        (Math.random() - 0.5) * 0.8, 1.1 + Math.random(), (Math.random() - 0.5) * 0.8,
-        0.5 + Math.random() * 0.5, 0.6 + Math.random() * 0.8,
-      );
+      const h = brakeHaze(sim.brakeT[i], speed);
+      hazeTotal += h;
+      const shimmers = takeBudget(fx.haze.budget, h * 14 * dt);
+      for (let k = 0; k < shimmers; k++) {
+        emit(
+          fx.haze.ring, w.x, w.y + 0.25, w.z,
+          (Math.random() - 0.5) * 0.8, 1.1 + Math.random(), (Math.random() - 0.5) * 0.8,
+          0.5 + Math.random() * 0.5, 0.6 + Math.random() * 0.8,
+        );
+      }
     }
 
     // Rubber on the road, at the wheel's own track position rather than the car's:
@@ -229,50 +254,53 @@ export function updateCarEffects(fx, c, dt) {
     }
   }
 
-  // Plank sparks, from under the floor at each end. Ride height is measured to the
-  // floor, so a negative value is the plank on the ground and its depth is the
-  // penetration the contact force is computed from.
-  const plankForce = h => (h < 0 ? -h * PLANK_STIFFNESS : 0);
-  for (const [force, offset] of [
-    [plankForce(sim.rideFront), 1.4],
-    [plankForce(sim.rideRear), -1.2],
-  ]) {
-    const rate = sparkRate(force, speed);
-    sparkTotal += rate;
-    const n = takeBudget(fx.sparks.budget, rate * 260 * dt);
-    for (let k = 0; k < n; k++) {
-      // A spark shower is a cone thrown backwards, and its speed comes from the
-      // car rather than from an explosion.
-      const back = 0.35 + Math.random() * 0.5;
-      emit(
-        fx.sparks.ring,
-        c.x + c.forwardX * offset, c.groundY + 0.03, c.z + c.forwardZ * offset,
-        -c.forwardX * speed * back + (Math.random() - 0.5) * 5,
-        1.5 + Math.random() * 3.5,
-        -c.forwardZ * speed * back + (Math.random() - 0.5) * 5,
-        0.25 + Math.random() * 0.45,
-        0.5 + Math.random() * 0.9,
-      );
+  if (particles) {
+    // Plank sparks, from under the floor at each end. Ride height is measured to the
+    // floor, so a negative value is the plank on the ground and its depth is the
+    // penetration the contact force is computed from.
+    const plankForce = h => (h < 0 ? -h * PLANK_STIFFNESS : 0);
+    for (const [force, offset] of [
+      [plankForce(sim.rideFront), 1.4],
+      [plankForce(sim.rideRear), -1.2],
+    ]) {
+      const rate = sparkRate(force, speed);
+      sparkTotal += rate;
+      const n = takeBudget(fx.sparks.budget, rate * 260 * dt);
+      for (let k = 0; k < n; k++) {
+        // A spark shower is a cone thrown backwards, and its speed comes from the
+        // car rather than from an explosion.
+        const back = 0.35 + Math.random() * 0.5;
+        emit(
+          fx.sparks.ring,
+          c.x + c.forwardX * offset, c.groundY + 0.03, c.z + c.forwardZ * offset,
+          -c.forwardX * speed * back + (Math.random() - 0.5) * 5,
+          1.5 + Math.random() * 3.5,
+          -c.forwardZ * speed * back + (Math.random() - 0.5) * 5,
+          0.25 + Math.random() * 0.45,
+          0.5 + Math.random() * 0.9,
+        );
+      }
     }
+
+    // Exhaust haze, which is engine load rather than temperature.
+    const exhaust = exhaustHaze(c.throttle, sim.rpm);
+    if (c.exhaust) {
+      const n = takeBudget(fx.haze.budget, Math.max(0, exhaust - 0.25) * 14 * dt);
+      for (let k = 0; k < n; k++) {
+        emit(
+          fx.haze.ring, c.exhaust.x, c.exhaust.y, c.exhaust.z,
+          -c.forwardX * 6 + (Math.random() - 0.5), 1.4 + Math.random(),
+          -c.forwardZ * 6 + (Math.random() - 0.5),
+          0.35 + Math.random() * 0.35, 0.4 + Math.random() * 0.6,
+        );
+      }
+    }
+
+    flushSystem(fx.smoke, dt);
+    flushSystem(fx.sparks, dt);
+    flushSystem(fx.haze, dt);
   }
 
-  // Exhaust haze, which is engine load rather than temperature.
-  const exhaust = exhaustHaze(c.throttle, sim.rpm);
-  if (c.exhaust) {
-    const n = takeBudget(fx.haze.budget, Math.max(0, exhaust - 0.25) * 14 * dt);
-    for (let k = 0; k < n; k++) {
-      emit(
-        fx.haze.ring, c.exhaust.x, c.exhaust.y, c.exhaust.z,
-        -c.forwardX * 6 + (Math.random() - 0.5), 1.4 + Math.random(),
-        -c.forwardZ * 6 + (Math.random() - 0.5),
-        0.35 + Math.random() * 0.35, 0.4 + Math.random() * 0.6,
-      );
-    }
-  }
-
-  flushSystem(fx.smoke, dt);
-  flushSystem(fx.sparks, dt);
-  flushSystem(fx.haze, dt);
   flushMarks(fx.marks);
 
   fx.rates.smoke = smokeTotal / WHEELS;
@@ -309,6 +337,7 @@ export function updateBrakeGlow(fx, material, brakeT, braking) {
 
 export function disposeCarEffects(fx, scene) {
   for (const sys of [fx.smoke, fx.sparks, fx.haze]) {
+    if (!sys) continue;
     scene.remove(sys.points);
     sys.geometry.dispose();
     sys.material.dispose();

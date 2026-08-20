@@ -31,6 +31,10 @@ class GzipHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
+        # Local demo: never let the browser keep ES modules. A half-updated
+        # cache (new EngineAudio.js, old engineTone.js) surfaces as missing
+        # named exports rather than an obvious "stale file" error.
+        self.send_header('Cache-Control', 'no-store')
         super().end_headers()
 
     def do_GET(self):

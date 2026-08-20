@@ -2,7 +2,7 @@ import {
   engineVoice, engineOrderSpectrum, MAX_ORDER,
   SLEW_UP_RPM_S, SLEW_DOWN_RPM_S, SLEW_SHIFT_RPM_S,
   SHIFT_WINDOW_S, SHIFT_DIP_GAIN, SHIFT_DIP_S, WASTEGATE_S,
-} from './engineTone.js';
+} from './engineTone.js?v=wastegate';
 import { IDLE_RPM, REDLINE_RPM, rpmFor, advanceGear } from '../dash/gearbox.js';
 import { loudestScrub, kerbVoice, plankVoice } from './tyreAudio.js';
 
