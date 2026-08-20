@@ -2,7 +2,7 @@
 
 Browser F1-style racer built on the HelloRacer demo: Silverstone GP circuit, four-wheel physics, WebGPU rendering with a WebGL fallback.
 
-**Play:** [https://ihormudryy.github.io/helloracer-webgl/](https://ihormudryy.github.io/helloracer-webgl/)
+**Play:** [https://ihormudryy.github.io/f1-simulator/](https://ihormudryy.github.io/f1-simulator/)
 
 ## Controls
 
