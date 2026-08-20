@@ -70,6 +70,7 @@ import {
   createSurfaceSamples, sampleWheelSurfaces, fitGroundPlane, createGroundPlane,
   WHEEL_X, WHEEL_Y,
 } from './surface.js';
+import { applySetup, defaultSetup } from './setup.js';
 import * as S_ from './state.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -160,11 +161,14 @@ export const WARM_BRAKE_T = 500;
  * solver into a shared array, costs the readability of the one piece of code here
  * most worth being able to read.
  */
-export function createCar({ x = 0, z = 0, yaw = 0, shared = false } = {}) {
+export function createCar({ x = 0, z = 0, yaw = 0, shared = false, setup = null } = {}) {
   const S = S_.createState({ shared });
+  const tune = applySetup(setup ?? defaultSetup());
   const car = {
     S,
-    suspension: createSuspensionState(),
+    /** Everything the setup screen moves, derived once. See setup.js. */
+    tune,
+    suspension: createSuspensionState(tune),
     aero: createAeroState(),
     gearbox: createGearboxState(),
     ers: createErsState(),
@@ -207,6 +211,7 @@ export function createCar({ x = 0, z = 0, yaw = 0, shared = false } = {}) {
     _cond: {
       speed: 0, rideFront: RIDE_HEIGHT_FRONT, rideRear: RIDE_HEIGHT_REAR,
       sideslip: 0, yawRate: 0, drs: false, dt: 0, activeAero: false,
+      claWingFront: 0, claWingRear: 0, cdaWings: 0,
     },
     _load: { aeroFront: 0, aeroRear: 0, ax: 0, ay: 0, ground: [0, 0, 0, 0] },
     resets: 0,
@@ -366,6 +371,9 @@ export function step(car, input, track, dt) {
   cond.yawRate = av;
   cond.drs = Boolean(input.drs);
   cond.dt = dt;
+  cond.claWingFront = car.tune.claWingFront;
+  cond.claWingRear = car.tune.claWingRear;
+  cond.cdaWings = car.tune.cdaWings;
   const aero = groundEffect(car.aero, cond);
   S[S_.S_FLOOR_LAG_FRONT] = aero.floorLagFront;
   S[S_.S_FLOOR_LAG_REAR] = aero.floorLagRear;
@@ -425,8 +433,8 @@ export function step(car, input, track, dt) {
 
   // ---- brakes -----------------------------------------------------------
   const demandTotal = BRAKE_TORQUE_MAX * brakePedal;
-  const demandFront = demandTotal * BRAKE_BIAS_FRONT;
-  const demandRear = demandTotal * (1 - BRAKE_BIAS_FRONT);
+  const demandFront = demandTotal * car.tune.brakeBiasFront;
+  const demandRear = demandTotal * (1 - car.tune.brakeBiasFront);
   // Brake-by-wire: the MGU-K takes what it can of the rear, friction the rest, so
   // the balance moves rearward as the battery fills.
   const bbw = brakeByWire(demandRear, car.ers.soc, rpm, gear, speed, car._bbw);
@@ -434,12 +442,12 @@ export function step(car, input, track, dt) {
 
   // ---- per wheel --------------------------------------------------------
   const fzW = wheelNormalLoads(
-    S[S_.S_A_LONG], S[S_.S_A_LAT], aero.downforce, aero.balanceFront);
+    S[S_.S_A_LONG], S[S_.S_A_LAT], aero.downforce, aero.balanceFront, car.tune);
   // Prefer the suspension's own loads once it is carrying the car: they include
   // bumps, kerbs and a wheel in the air, which the algebraic model cannot.
   const suspFz = car.suspension.fz;
   const suspTotal = suspFz[0] + suspFz[1] + suspFz[2] + suspFz[3];
-  const useSuspension = suspTotal > MASS * G * 0.2;
+  const useSuspension = suspTotal > car.tune.mass * G * 0.2;
 
   let sumFx = 0;
   let sumFy = 0;
@@ -459,7 +467,7 @@ export function step(car, input, track, dt) {
   // Open-to-locked differential: torque is shared by the lock fraction toward the
   // slower wheel, so a spinning inside rear does not take all the drive with it.
   const rearSlipBias = S[S_.S_OMEGA + S_.RL] - S[S_.S_OMEGA + S_.RR];
-  const diffTransfer = DIFF_LOCK * clamp(rearSlipBias * 0.05, -0.5, 0.5);
+  const diffTransfer = car.tune.diffLock * clamp(rearSlipBias * 0.05, -0.5, 0.5);
 
   for (let i = 0; i < 4; i++) {
     const isFront = i < 2;
@@ -498,7 +506,8 @@ export function step(car, input, track, dt) {
     tyre.carcassT = S[S_.S_TYRE_CARCASS_T + i];
     tyre.wear = S[S_.S_TYRE_WEAR + i];
     // The per-axle scale is what makes the rear tyre a bigger tyre.
-    const d = peakGrip(surf.mu, fz, gripScale(tyre) * muScaleFor(isFront));
+    const d = peakGrip(surf.mu, fz,
+      gripScale(tyre) * (isFront ? car.tune.muScaleFront : car.tune.muScaleRear));
 
     combinedSlipForces(d, kappaLag, alphaLag, car._force);
     let fxW = car._force.fx;
@@ -588,12 +597,13 @@ export function step(car, input, track, dt) {
 
   // Gravity along the road. This is what makes a hill cost time going up and give
   // it back coming down, and what makes a banked corner hold the car in.
-  sumFx -= MASS * G * ground.gradeLong;
-  sumFy -= MASS * G * ground.gradeLat;
+  sumFx -= car.tune.mass * G * ground.gradeLong;
+  sumFy -= car.tune.mass * G * ground.gradeLat;
 
   // ---- integrate --------------------------------------------------------
-  const aLong = sumFx / MASS;
-  const aLat = sumFy / MASS;
+  const mass = car.tune.mass;
+  const aLong = sumFx / mass;
+  const aLat = sumFy / mass;
   const avDot = sumMav / IZ;
 
   S[S_.S_A_LONG] = aLong;

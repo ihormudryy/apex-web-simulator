@@ -196,7 +196,15 @@ export const CORNER_AX = [LF, LF, -LR, -LR];
 export const CORNER_AY = [TRACK_HALF, -TRACK_HALF, TRACK_HALF, -TRACK_HALF];
 const IS_FRONT = [true, true, false, false];
 
-const kSpring = i => (IS_FRONT[i] ? K_SPRING_FRONT : K_SPRING_REAR);
+/**
+ * Rates come off the state, not the module, so a setup change reaches the springs.
+ *
+ * The constants remain the defaults and the reference figures are still measured
+ * against them — but a balance tool that cannot be moved is a claim rather than a
+ * tool, and roll stiffness distribution is the one the plan calls primary.
+ */
+const kSpring = (s, i) => (IS_FRONT[i] ? s.kSpringFront : s.kSpringRear);
+const arbOf = (s, i) => (IS_FRONT[i] ? s.arbFront : s.arbRear);
 const bumpGap = i => (IS_FRONT[i] ? BUMP_STOP_GAP_FRONT : BUMP_STOP_GAP_REAR);
 const droopGap = i => (IS_FRONT[i] ? DROOP_TRAVEL_FRONT : DROOP_TRAVEL_REAR);
 
@@ -275,16 +283,25 @@ export function heaveForce(axleCompression, front) {
  * Exported because the capability probe looks for it and because it is the thing
  * a setup screen wants to plot.
  */
-export function suspensionForce(compression, rate, i, axleCompression = 0, roll = 0) {
-  const arb = IS_FRONT[i] ? ARB_FRONT : ARB_REAR;
+export function suspensionForce(compression, rate, i, axleCompression = 0, roll = 0, tune = DEFAULT_TUNE) {
   // The bar reacts body roll, opposing it, shared between the two corners.
-  const arbForce = -Math.sign(CORNER_AY[i]) * arb * roll / TRACK;
-  return kSpring(i) * compression
+  const arbForce = -Math.sign(CORNER_AY[i]) * arbOf(tune, i) * roll / TRACK;
+  return kSpring(tune, i) * compression
     + damperForce(rate, i)
     + bumpStopForce(compression, i)
     + heaveForce(axleCompression, IS_FRONT[i])
     + arbForce;
 }
+
+/** The baseline rates, so every entry point works without a setup. */
+export const DEFAULT_TUNE = {
+  kSpringFront: K_SPRING_FRONT,
+  kSpringRear: K_SPRING_REAR,
+  arbFront: ARB_FRONT,
+  arbRear: ARB_REAR,
+  rideHeightFront: RIDE_HEIGHT_FRONT,
+  rideHeightRear: RIDE_HEIGHT_REAR,
+};
 
 // ---------------------------------------------------------------------------
 // State
@@ -294,8 +311,15 @@ export function suspensionForce(compression, rate, i, axleCompression = 0, roll 
  * All seven positions and seven velocities, plus the outputs the rest of the sim
  * reads. Allocated once per car; `step` mutates it and returns nothing.
  */
-export function createSuspensionState() {
+export function createSuspensionState(tune = DEFAULT_TUNE) {
   return {
+    /** Setup-dependent rates. See `applySetup` in setup.js. */
+    kSpringFront: tune.kSpringFront ?? K_SPRING_FRONT,
+    kSpringRear: tune.kSpringRear ?? K_SPRING_REAR,
+    arbFront: tune.arbFront ?? ARB_FRONT,
+    arbRear: tune.arbRear ?? ARB_REAR,
+    rideHeightFront: tune.rideHeightFront ?? RIDE_HEIGHT_FRONT,
+    rideHeightRear: tune.rideHeightRear ?? RIDE_HEIGHT_REAR,
     // Positions: heave, pitch, roll, then the four wheels.
     zc: 0, pitch: 0, roll: 0,
     zw: [0, 0, 0, 0],
@@ -305,8 +329,8 @@ export function createSuspensionState() {
     /** Outputs. */
     fz: [FZ_STATIC[0], FZ_STATIC[1], FZ_STATIC[2], FZ_STATIC[3]],
     compression: [0, 0, 0, 0],
-    rideFront: RIDE_HEIGHT_FRONT,
-    rideRear: RIDE_HEIGHT_REAR,
+    rideFront: tune.rideHeightFront ?? RIDE_HEIGHT_FRONT,
+    rideRear: tune.rideHeightRear ?? RIDE_HEIGHT_REAR,
     /** True while any corner is on its bump stop — the car is riding the packers. */
     onBumpStop: false,
     /** True while the body attitude is against the small-angle limit. */
@@ -327,8 +351,8 @@ export function resetSuspension(s) {
     s.fz[i] = FZ_STATIC[i];
     s.compression[i] = 0;
   }
-  s.rideFront = RIDE_HEIGHT_FRONT;
-  s.rideRear = RIDE_HEIGHT_REAR;
+  s.rideFront = s.rideHeightFront;
+  s.rideRear = s.rideHeightRear;
   s.onBumpStop = false;
   s.attitudeLimited = false;
 }
@@ -383,7 +407,7 @@ export function step(s, load, dt) {
     s.compression[i] = compression;
 
     const fs = suspensionForce(
-      compression, rate, i, IS_FRONT[i] ? axleFront : axleRear, s.roll);
+      compression, rate, i, IS_FRONT[i] ? axleFront : axleRear, s.roll, s);
 
     // Suspension pushes the chassis up and the wheel down.
     f[0] += fs;
@@ -420,7 +444,7 @@ export function step(s, load, dt) {
 
     // Suspension acts along the relative coordinate `zw − zc − ax·pitch − ay·roll`,
     // so its Jacobian is the outer product of that gradient with itself.
-    const kEff = kSpring(i) + bumpStopRate(s.compression[i], i);
+    const kEff = kSpring(s, i) + bumpStopRate(s.compression[i], i);
     const cEff = damperRate(rate, i);
     const w = dt * cEff + h2 * kEff;
     const grad = [-1, -ax_i, -ay_i, 0, 0, 0, 0];
@@ -474,8 +498,8 @@ export function step(s, load, dt) {
   // Ride height is the floor, which follows the chassis, over the road.
   const gF = ground ? 0.5 * (ground[0] + ground[1]) : 0;
   const gR = ground ? 0.5 * (ground[2] + ground[3]) : 0;
-  s.rideFront = RIDE_HEIGHT_FRONT + (s.zc + LF * s.pitch) - gF;
-  s.rideRear = RIDE_HEIGHT_REAR + (s.zc - LR * s.pitch) - gR;
+  s.rideFront = s.rideHeightFront + (s.zc + LF * s.pitch) - gF;
+  s.rideRear = s.rideHeightRear + (s.zc - LR * s.pitch) - gR;
 
   s.onBumpStop = false;
   for (let i = 0; i < 4; i++) {

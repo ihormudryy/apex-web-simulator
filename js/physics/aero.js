@@ -226,12 +226,16 @@ export function groundEffect(out, c) {
   out.floorLagFront = lagFloor(out.floorLagFront, targetF, speed, dt);
   out.floorLagRear = lagFloor(out.floorLagRear, targetR, speed, dt);
 
-  let claFront = CLA_WING_FRONT + CLA_FLOOR_FRONT * out.floorLagFront;
-  let claRear = CLA_WING_REAR + CLA_FLOOR_REAR * out.floorLagRear;
+  // Wing ClA comes from the conditions when a setup supplies it, so a wing click
+  // reaches the downforce. The floor is not adjustable — it is bodywork.
+  const wingFront = c.claWingFront ?? CLA_WING_FRONT;
+  const wingRear = c.claWingRear ?? CLA_WING_REAR;
+  let claFront = wingFront + CLA_FLOOR_FRONT * out.floorLagFront;
+  let claRear = wingRear + CLA_FLOOR_REAR * out.floorLagRear;
 
   // DRS and active aero act on the rear wing only.
   const open = Boolean(c.drs) || Boolean(c.activeAero && c.drs);
-  if (open) claRear = Math.max(CLA_WING_REAR * 0.4, claRear - DRS_CLA_LOSS);
+  if (open) claRear = Math.max(wingRear * 0.4, claRear - DRS_CLA_LOSS);
 
   // Yaw. A sliding car loses downforce as well as direction.
   const beta = Math.abs(c.sideslip || 0);
@@ -248,9 +252,9 @@ export function groundEffect(out, c) {
   out.balanceFront = out.claTotal > 1e-9 ? claFront / out.claTotal : 0.4;
 
   // Drag: body, rear wing, induced, all scaled up in yaw.
-  const wingDrag = open ? CDA_REAR_WING_DRS : CDA_REAR_WING;
+  const wingDrag = (open ? CDA_REAR_WING_DRS : CDA_REAR_WING) + (c.cdaWings ?? 0);
   const induced = CDA_INDUCED_K * out.claTotal * out.claTotal;
-  out.cdA = (CDA_BODY + wingDrag + induced) * (1 + YAW_CDA_GAIN * beta);
+  out.cdA = Math.max(0.2, (CDA_BODY + wingDrag + induced) * (1 + YAW_CDA_GAIN * beta));
   out.drag = q * out.cdA;
 
   // Body side force at the centre of pressure. The local sideslip there includes

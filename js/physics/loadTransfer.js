@@ -59,19 +59,26 @@ export const LATERAL_TRANSFER_FRONT_SHARE =
  * @param {number} aeroSplitFront fraction of downforce on the front axle
  * @returns {[number, number, number, number]} Fz FL, FR, RL, RR
  */
-export function wheelNormalLoads(axPrev, ayPrev, aeroLift, aeroSplitFront = AERO_SPLIT_FRONT) {
-  const fzStaticF = MASS * G * LR / WB;
-  const fzStaticR = MASS * G * LF / WB;
+export function wheelNormalLoads(
+  axPrev, ayPrev, aeroLift, aeroSplitFront = AERO_SPLIT_FRONT, tune = null,
+) {
+  // The arms are what the roll-stiffness setting moves, so they come from the
+  // setup when there is one. Without one, the baseline constants.
+  const armFront = tune?.lateralArmFront ?? LATERAL_ARM_FRONT;
+  const armRear = tune?.lateralArmRear ?? LATERAL_ARM_REAR;
+  const mass = tune?.mass ?? MASS;
+  const fzStaticF = mass * G * LR / WB;
+  const fzStaticR = mass * G * LF / WB;
 
-  const deltaLong = (MASS * axPrev * H_CG) / WB;
+  const deltaLong = (mass * axPrev * H_CG) / WB;
   const fzF = fzStaticF - deltaLong + aeroSplitFront * aeroLift;
   const fzR = fzStaticR + deltaLong + (1 - aeroSplitFront) * aeroLift;
 
   // Split by roll stiffness rather than evenly. A positive `ayPrev` is rightward
   // acceleration, which loads the left-hand wheels — the outside of a right turn.
-  const q = (MASS * ayPrev) / TRACK;
-  const deltaLatF = q * LATERAL_ARM_FRONT;
-  const deltaLatR = q * LATERAL_ARM_REAR;
+  const q = (mass * ayPrev) / TRACK;
+  const deltaLatF = q * armFront;
+  const deltaLatR = q * armRear;
 
   return [
     Math.max(FZ_MIN, fzF / 2 + deltaLatF),
