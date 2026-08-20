@@ -15,6 +15,7 @@ import {
 } from './render/carEffects.js';
 import {
   wingWeights, deformBody, wheelCollapse, paintWear, damageSignature,
+  NO_MESH_DAMAGE,
 } from './render/meshDamage.js';
 import { enableCarParticleSystems } from './render/carParticleBackend.js';
 
@@ -142,6 +143,13 @@ export class Car {
       this.brakeMat.emissive.setHex(0x330000);
       this.brakeMat.emissiveIntensity = 0.4;
     }
+    this.restoreMeshDamage();
+  }
+
+  /** Undo wing crumple, wheel camber collapse and paint wear after Esc / reset. */
+  restoreMeshDamage() {
+    this._damageSig = undefined;
+    this._applyMeshDamage(NO_MESH_DAMAGE);
   }
 
   _makeWheel(x, y, z) {

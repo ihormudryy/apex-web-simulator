@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   wingWeights, deformBody, wheelCollapse, paintWear, damageSignature,
-  crumpleHash, WING_Z_FROM, WING_Y_FULL, Y_FLOOR, DROOP_FULL,
+  crumpleHash, WING_Z_FROM, WING_Y_FULL, Y_FLOOR, DROOP_FULL, NO_MESH_DAMAGE,
 } from './meshDamage.js';
 
 /** A toy body: one wing vertex, one nose vertex, one cockpit vertex. */
@@ -104,4 +104,10 @@ test('the signature only changes when the damage meaningfully does', () => {
   const different = damageSignature({ wing: 0.55, floor: 0, wheels: [0, 0, 0, 0] });
   assert.equal(a, same);
   assert.notEqual(a, different);
+});
+
+test('NO_MESH_DAMAGE is the zero signature', () => {
+  assert.equal(damageSignature(NO_MESH_DAMAGE), '0|0|0,0,0,0');
+  assert.equal(paintWear(NO_MESH_DAMAGE.total).roughnessScale, 1);
+  assert.equal(wheelCollapse(0).camber, 0);
 });

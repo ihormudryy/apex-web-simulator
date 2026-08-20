@@ -780,6 +780,7 @@ class HelloRacer {
   _resetRace() {
     this._clearCarForGridReset();
     this._placeCarOnTrack();
+    this.car.restoreMeshDamage();
     if (this.telemetry?.reset) this.telemetry.reset();
     this._chaseReady = false;
     this._followYaw = this.car.root.rotation.y;

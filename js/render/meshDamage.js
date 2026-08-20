@@ -171,3 +171,11 @@ export function damageSignature(dmg) {
   const q = v => Math.round(v * 64);
   return `${q(dmg.wing)}|${q(dmg.floor)}|${dmg.wheels.map(q).join(',')}`;
 }
+
+/** Pristine damage state — Esc / grid reset restores the mesh to this. */
+export const NO_MESH_DAMAGE = Object.freeze({
+  wing: 0,
+  floor: 0,
+  wheels: Object.freeze([0, 0, 0, 0]),
+  total: 0,
+});
