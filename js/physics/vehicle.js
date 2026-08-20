@@ -44,8 +44,8 @@ export { maxSteerAt, MAX_STEER_DEG } from './driver.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-export function createVehicle({ x = 0, z = 0, yaw = 0, warm = true } = {}) {
-  const car = createCar({ x, z, yaw });
+export function createVehicle({ x = 0, z = 0, yaw = 0, warm = true, setup = null } = {}) {
+  const car = createCar({ x, z, yaw, setup });
   if (warm) warmUp(car);
   const v = {
     /** The kernel's car, including its flat state vector at `car.S`. */

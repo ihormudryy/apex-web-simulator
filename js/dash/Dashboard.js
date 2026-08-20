@@ -62,6 +62,7 @@ export class Dashboard {
       this._buildSpeed(),
       this._buildTraction(),
       this._buildTiming(),
+      this._buildCarState(),
     );
 
     const hint = el('div', 'dash__hint');
@@ -94,6 +95,75 @@ export class Dashboard {
     if (this._textAccumulator < 1 / TEXT_HZ) return;
     this._textAccumulator = 0;
     this._setText(snapshot);
+    this._setCarState(snapshot);
+  }
+
+  /**
+   * Car state: the channels the new physics produces and the old model could not.
+   *
+   * Tyre and brake temperature, wear, ERS charge, ride height, DRS. All of it comes
+   * from the kernel rather than being inferred, which is the difference between a
+   * readout and a decoration — a tyre temperature guessed from which keys are held
+   * cannot tell a driver they have overheated the left front, and that is the only
+   * thing the readout is for.
+   *
+   * Per corner where per corner is the point. Averaging the four tyre temperatures
+   * hides exactly the asymmetry a driver needs to see.
+   */
+  _buildCarState() {
+    const panel = el('div', 'dash__panel dash__panel--optional dash__panel--car');
+    panel.append(label('Car'));
+
+    this.tyreGrid = el('div', 'dash__grid');
+    this.tyreCells = [];
+    for (let i = 0; i < 4; i++) {
+      const cell = el('div', 'dash__cell');
+      this.tyreCells.push(cell);
+      this.tyreGrid.append(cell);
+    }
+    panel.append(this.tyreGrid);
+
+    this.brakeRow = el('div', 'dash__row');
+    this.ersRow = el('div', 'dash__row');
+    this.rideRow = el('div', 'dash__row');
+    panel.append(this.brakeRow, this.ersRow, this.rideRow);
+    return panel;
+  }
+
+  _setCarState(s) {
+    if (!this.tyreCells) return;
+    const corner = ['FL', 'FR', 'RL', 'RR'];
+    for (let i = 0; i < 4; i++) {
+      const t = s.tyreT?.[i];
+      const wear = s.tyreWear?.[i];
+      const cell = this.tyreCells[i];
+      const text = Number.isFinite(t)
+        ? `${corner[i]} ${t.toFixed(0)}\u00b0 ${((wear ?? 0) * 100).toFixed(0)}%`
+        : `${corner[i]} --`;
+      this._setOnce(cell, text);
+      // Colour by the tyre model's own window, so the readout and the grip agree.
+      cell.dataset.state = !Number.isFinite(t) ? 'none'
+        : t < 70 ? 'cold' : t > 125 ? 'hot' : 'ok';
+    }
+
+    const brakes = s.brakeT;
+    this._setOnce(this.brakeRow, brakes
+      ? `Brakes ${brakes.map(v => v.toFixed(0)).join(' / ')}\u00b0`
+      : 'Brakes --');
+    this._setOnce(this.ersRow, Number.isFinite(s.ersCharge)
+      ? `ERS ${(s.ersCharge * 100).toFixed(0)}%   DRS ${s.drs ? 'OPEN' : 'shut'}`
+      : 'ERS --');
+    this._setOnce(this.rideRow, Number.isFinite(s.rideFront)
+      ? `Ride ${(s.rideFront * 1000).toFixed(0)} / ${(s.rideRear * 1000).toFixed(0)} mm`
+        + (s.plankContact ? '  SPARKS' : s.onBumpStop ? '  stops' : '')
+      : 'Ride --');
+  }
+
+  /** Write only when the text has changed — the DOM is the expensive part here. */
+  _setOnce(node, text) {
+    if (this._lastText.get(node) === text) return;
+    this._lastText.set(node, text);
+    node.textContent = text;
   }
 
   // ---- construction -------------------------------------------------------

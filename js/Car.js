@@ -347,6 +347,12 @@ export class Car {
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         (p.parent || this.body).add(mesh);
+        // Kept for the ghost, which is a clone of buffers already on the GPU
+        // rather than a second load of the same file.
+        if (name === 'BodyPaint') {
+          this._bodyGeometry = geo;
+          this._bodyOffset = { x: p.x, y: p.y, z: p.z };
+        }
       });
     }
 
@@ -474,6 +480,65 @@ export class Car {
     st.exhaust.y = sim.groundHeight + 0.42;
     st.exhaust.z = pose.z + cosY * 2.2;
     updateCarEffects(this._fx, st, dt);
+  }
+
+  /**
+   * A translucent copy of the bodywork, for the ghost lap.
+   *
+   * Built from the already-loaded body geometry rather than a second mesh load: it
+   * is one clone of buffers that are already on the GPU, and it is unmistakably the
+   * same car, which is the point — a box would read as a marker rather than as the
+   * lap you set.
+   *
+   * Returns null until the body has loaded.
+   */
+  makeGhostMesh() {
+    if (!this._bodyGeometry) return null;
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x66b0ff,
+      transparent: true,
+      opacity: 0.22,
+      // No depth write, so the player's car is never hidden behind a ghost, and
+      // the ghost reads as a projection rather than as traffic.
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(this._bodyGeometry, material);
+    const o = this._bodyOffset ?? { x: 0, y: 0, z: 0 };
+    mesh.position.set(o.x, o.y, o.z);
+    // The same two nested rotations the real car uses, so the ghost sits where the
+    // car would rather than ninety degrees off it.
+    const root = new THREE.Object3D();
+    const visual = new THREE.Object3D();
+    visual.rotation.y = DEG90;
+    const body = new THREE.Object3D();
+    body.rotation.y = DEG90;
+    body.add(mesh);
+    visual.add(body);
+    root.add(visual);
+    root.visible = false;
+    root.renderOrder = 2;
+    return root;
+  }
+
+  /**
+   * Rebuild the vehicle on a new setup, keeping the mesh.
+   *
+   * A rebuild rather than a mutation. Half of a setup lives in derived state — the
+   * roll stiffness, the lateral transfer arms, the suspension's own rates, the
+   * static corner loads — computed once from the whole thing, so writing one value
+   * into a live car leaves the rest of it describing the previous one. That is the
+   * failure mode that makes a setup screen untrustworthy: the slider moves, some of
+   * the car follows, and nobody can tell which part.
+   */
+  rebuild(setup) {
+    const previous = this.vehicle;
+    this.vehicle = createVehicle({
+      x: previous.spawn.x, z: previous.spawn.z, yaw: previous.spawn.yaw, setup,
+    });
+    this.vehicle.aids = previous.aids;
+    this.setup = setup;
+    return this.vehicle;
   }
 
   /**

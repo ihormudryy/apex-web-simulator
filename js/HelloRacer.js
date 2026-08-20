@@ -10,6 +10,10 @@ import {
 } from './render/chassisCamera.js';
 import { Dashboard } from './dash/Dashboard.js';
 import { createTelemetry } from './dash/telemetry.js';
+import { SetupPanel } from './dash/setupPanel.js';
+import {
+  createGhostState, recordGhostStep, completeLap, advanceGhost, ghostTime,
+} from './physics/ghost.js';
 import {
   directionFromEquirectUV, sunDirectionFromEquirect, horizonColorFromEquirect,
 } from './render/equirect.js';
@@ -17,7 +21,10 @@ import { outdoorSkyData, DEFAULT_SUN_U, DEFAULT_SUN_V } from './render/outdoorSk
 import { createRendererBackend } from './render/rendererBackend.js';
 import { setSunLightDirection } from './render/sunLightDirection.js';
 import { EngineAudio } from './audio/EngineAudio.js';
-import { setPose, resetVehicle } from './physics/vehicle.js';
+import {
+  setPose, resetVehicle, createVehicle, replayStep, renderPose, telemetryOf,
+} from './physics/vehicle.js';
+import { resetGhost as resetGhostState } from './physics/ghost.js';
 import { GroundedSkybox } from 'three/addons/objects/GroundedSkybox.js';
 
 const SKY_COLOR = 0xa8d6ff;
@@ -109,6 +116,12 @@ class HelloRacer {
     this._csmMaterialScanFrames = 120;
     this._bounceLight = null;
     this._headCam = createChassisCamera();
+    this.setup = null;
+    this.setupPanel = null;
+    this.ghost = null;
+    this.ghostCar = null;
+    this._ghostMesh = null;
+    this._lastLapCount = 0;
     this.engineAudio = new EngineAudio();
     this._fx = {
       csm: true,
@@ -254,6 +267,19 @@ class HelloRacer {
 
     this.telemetry = createTelemetry({ lapLength: this.track.centerline.length });
     this.dashboard = new Dashboard(container, this.track, { circuitName: 'Silverstone' });
+
+    // Setup screen. Applying one rebuilds the car, because half of a setup lives in
+    // derived state — roll stiffness, corner loads, the suspension's own rates —
+    // and mutating one value in place would leave the rest describing the old car.
+    this.setupPanel = new SetupPanel(container, {
+      onApply: setup => this._applySetup(setup),
+    });
+
+    // Ghost lap. The recorder is attached to the player's vehicle so inputs are
+    // captured on the sim clock, which is the only clock a replay can trust.
+    this.ghost = createGhostState();
+    this.ghostCar = createVehicle({});
+    this.car.vehicle.recorder = this.ghost.current;
     this._setupResetControl(container);
 
     this._lastTime = performance.now();
@@ -704,6 +730,7 @@ class HelloRacer {
     this.stats.update();
 
     const snap = this.telemetry.sample(this.car, this.track, dt);
+    this._updateGhost(snap, dt);
     this.engineAudio.update(snap);
     if (this.dashboard.visible) this.dashboard.update(snap, dt);
   }
@@ -715,6 +742,66 @@ class HelloRacer {
     this._taaPass.jitter(this.camera, size.x, size.y);
     this.camera.updateMatrixWorld();
     this._taaPass.captureCamera(this.camera);
+  }
+
+  /**
+   * Rebuild the car on a new setup, and put it back where it was.
+   *
+   * A rebuild rather than a mutation: the derived state — roll stiffness, the
+   * lateral transfer arms, the suspension's rates, the corner loads — is computed
+   * once from the whole setup, and writing one value into a live car leaves the
+   * rest of it describing the previous one.
+   */
+  _applySetup(setup) {
+    this.setup = setup;
+    this.car.rebuild(setup);
+    this.car.vehicle.recorder = this.ghost.current;
+    this._placeCarOnTrack();
+    this.telemetry.reset?.();
+    resetGhostState(this.ghost);
+  }
+
+  /**
+   * Advance the ghost, and hand a completed lap to it.
+   *
+   * The lap boundary comes from the telemetry rather than being detected again
+   * here: two independent lap detectors on the same track eventually disagree, and
+   * the one that matters is the one showing the time.
+   */
+  _updateGhost(snap, dt) {
+    if (snap.lapCount !== this._lastLapCount) {
+      this._lastLapCount = snap.lapCount;
+      if (Number.isFinite(snap.lastLapTime)) {
+        completeLap(this.ghost, snap.lastLapTime);
+        this.ghostCar.recorder = null;
+        setPose(this.ghostCar, this.car.vehicle.spawn.x, this.car.vehicle.spawn.z,
+          this.car.vehicle.spawn.yaw, this.track);
+        resetVehicle(this.ghostCar, this.track);
+      }
+    }
+    // The mesh can only be built once the body has loaded, which is after the
+    // first frame — so it is created lazily rather than at setup.
+    if (!this._ghostMesh) {
+      const mesh = this.car.makeGhostMesh();
+      if (mesh) {
+        this._ghostMesh = mesh;
+        this.scene.add(mesh);
+      }
+    }
+    const steps = advanceGhost(this.ghost, dt,
+      input => replayStep(this.ghostCar, input, this.track));
+    if (this._ghostMesh) {
+      this._ghostMesh.visible = this.ghost.active && steps >= 0 && this.ghost.best !== null;
+      if (this._ghostMesh.visible) {
+        const pose = renderPose(this.ghostCar, this._ghostPose ??= { x: 0, z: 0, yaw: 0 });
+        const sim = telemetryOf(this.ghostCar);
+        this._ghostMesh.position.set(pose.x, sim.chassisY, pose.z);
+        this._ghostMesh.rotation.y = pose.yaw;
+      }
+    }
+    this._ghostDelta = this.ghost.active
+      ? this.telemetry.lapTime - ghostTime(this.ghost)
+      : null;
   }
 
   _lerpAngle(a, b, t) {
@@ -929,6 +1016,12 @@ class HelloRacer {
   _onKeyDown(e) {
     if (e.code === 'KeyH') {
       if (!e.repeat) this.dashboard.toggle();
+      return;
+    }
+    // `P` for the setup panel: `S` is the brake, and stealing a driving key for a
+    // menu is how a car ends up in a barrier.
+    if (e.code === 'KeyP' && !e.repeat && this.setupPanel) {
+      this.setupPanel.toggle();
       return;
     }
     if (e.code === 'KeyG') {

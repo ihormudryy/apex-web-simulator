@@ -32,6 +32,10 @@ export const DASH_CSS = `
   gap: 10px;
   padding: 14px 14px 0;
   z-index: 150;
+  /* Clear of the material panel, which is fixed at the top right with a higher
+     z-index — the car-state panel was landing underneath it and losing half its
+     readout to something that is not even part of the HUD. */
+  padding-right: 250px;
   /* A readout must never eat the drag-to-orbit controls on the canvas. */
   pointer-events: none;
   font-family: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
@@ -207,4 +211,27 @@ export const DASH_CSS = `
 @media (prefers-reduced-motion: reduce) {
   .dash { transition: none; }
 }
+
+/* Car state: per-corner tyre and brake readouts. Coloured against the tyre
+   model's own temperature window, so the readout and the grip cannot disagree. */
+.dash__grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 3px 6px; margin: 2px 0 4px;
+}
+.dash__cell {
+  font-variant-numeric: tabular-nums; padding: 2px 4px; border-radius: 3px;
+  background: rgba(255, 255, 255, 0.04); color: #cfd6df;
+}
+.dash__cell[data-state=cold] { color: #7fb2ff; }
+.dash__cell[data-state=hot]  { color: #ff8a6a; }
+.dash__cell[data-state=ok]   { color: #9ce0a4; }
+.dash__row {
+  font-variant-numeric: tabular-nums; color: #9aa4b2; padding: 1px 0;
+}
+
+/* The car panel carries six rows where the others carry two or three, so it sets
+   its own type size rather than forcing every panel taller. */
+.dash__panel--car { min-width: 268px; }
+.dash__panel--car .dash__grid { gap: 2px 5px; margin: 1px 0 3px; }
+.dash__panel--car .dash__cell { font-size: 11px; padding: 1px 4px; }
+.dash__panel--car .dash__row { font-size: 11px; line-height: 1.32; }
 `;
