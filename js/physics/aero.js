@@ -58,7 +58,43 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
  * the *maximum* is higher, because the car is never quite at the optimum on both
  * axles at once. That gap is where the balance movement lives.
  */
-export const CLA_WING_FRONT = 0.55;
+/**
+ * The front/rear split sets the aero balance, and the balance was the biggest
+ * measured realism gap left in the car: ~40% front at speed where a real 2022
+ * car runs 44-46%, with the front axle saturating (1.00 of its capability used
+ * against the rear's 0.63) while a third of the rear's grip went untouched.
+ * Terminal high-speed understeer, and no setup lever could reach it because the
+ * wings are what set the split.
+ *
+ * The front wing was 0.55, and 0.65 is a measured bound, not a preference. Two
+ * sweeps disagree about where the edge is and the stricter one wins:
+ *
+ * Steady-state cornering says go to 0.85 — peak lateral improves at every speed
+ * up to there (2.42/3.39 g at 150/250 km/h becomes 2.53/3.64) and only collapses
+ * beyond 1.0. But the TRANSIENT is the binding constraint: braking drops the
+ * front ride height, the front floor gains, and the balance runs further forward
+ * exactly when the driver is turning in. Trail-braking sideslip against the
+ * wing, measured:
+ *
+ *     wingF   trail-brake sideslip   1.4 g autopilot lap
+ *      0.55        3.0 deg              clean, 7 deg max
+ *      0.65        6.5 deg              clean, 9 deg max     <- here
+ *      0.70       10.4 deg              clean, 13 deg max
+ *      0.75       14.2 deg              lurid, 16 deg max
+ *      0.85       20.1 deg              SPINS, 16% off road
+ *
+ * Real corner-entry rotation is a few degrees of sideslip; 10+ is a moment and
+ * 20 is a spin a keyboard cannot catch. 0.65 doubles the entry rotation — the
+ * pointiness on the brakes these cars are known for — and keeps it catchable.
+ *
+ * Two directions that measured worse, kept so nobody retries them blind: taking
+ * the shift out of the REAR wing collapses the car at speed (2.55 g at 150 but
+ * 1.59 at 250 — the rear needs its downforce), and going past ~0.70 buys 1-2% of
+ * skid-pad grip for entry behaviour a driver cannot use. The residual balance
+ * gap to a real car's 44-46% is not reachable by wing split alone in this model;
+ * it needs more rear axle authority (grip or yaw damping) first.
+ */
+export const CLA_WING_FRONT = 0.65;
 export const CLA_FLOOR_FRONT = 1.55;
 export const CLA_WING_REAR = 1.05;
 export const CLA_FLOOR_REAR = 1.85;

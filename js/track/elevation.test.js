@@ -438,13 +438,17 @@ test('a constant gradient does NOT keep compressing the springs as the car climb
 });
 
 test('a climb costs speed and a descent gives it back', () => {
+  // Twelve seconds, not five: the speed converges with the drag time constant,
+  // m / (rho * v * CdA) ~ 7 s at these speeds, so a 5 s snapshot only expressed
+  // part of the slope's effect — and shrank below the 1 m/s gate the moment the
+  // front wing change added induced drag. The property is about terminal speeds.
   const run = grade => {
     const car = createCar({});
     warmUp(car);
     const track = surfaceTrack({ grade });
     rebaseToGround(car, track);
     launch(car, 60);
-    for (let i = 0; i < 600 * 5; i++) {
+    for (let i = 0; i < 600 * 12; i++) {
       step(car, { throttle: 0.4, brake: 0, steer: 0 }, track, 1 / 600);
     }
     return forwardSpeed(car);
