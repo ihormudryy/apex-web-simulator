@@ -5,6 +5,7 @@ import {
   createTelemetry, formatLapTime, formatDelta, formatSector,
 } from './telemetry.js';
 import { createVehicle } from '../physics/vehicle.js';
+import { MU } from '../physics/bicycle.js';
 
 const LAP = 5891;
 const DT = 1 / 60;
@@ -145,7 +146,13 @@ test('the grip limit grows with downforce', () => {
   const track = fakeTrack();
   const slow = telemetry.sample(fakeCar({ vehicle: { vz: -10 } }), track, DT);
   const fast = telemetry.sample(fakeCar({ vehicle: { vz: -80 } }), track, DT);
-  assert.ok(slow.gripLimitG > 1.5 && slow.gripLimitG < 1.8, `slow ${slow.gripLimitG}`);
+  // Bounded against MU rather than a literal: at walking pace the grip limit
+  // *is* the friction coefficient, so hardcoding 1.6 here just restated the
+  // constant and broke when it was recalibrated to 1.85.
+  assert.ok(
+    Math.abs(slow.gripLimitG - MU.tarmac) < 0.1,
+    `at 10 m/s the limit should be about mu (${MU.tarmac}), got ${slow.gripLimitG}`,
+  );
   assert.ok(fast.gripLimitG > 4, `at 80 m/s the tyres should carry over 4 g, got ${fast.gripLimitG}`);
 });
 

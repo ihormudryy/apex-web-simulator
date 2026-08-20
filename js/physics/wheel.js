@@ -73,6 +73,33 @@ export const WHEEL_RADIUS = 0.334;
 export const WHEEL_INERTIA = 1.5;
 
 /**
+ * Front and rear are **different tyres**, and this is not a detail.
+ *
+ * 2022+ regulations: 305 mm front, 405 mm rear. A third wider at the back, with a
+ * correspondingly wider and stiffer contact patch, so the rear axle has materially
+ * more peak grip and cornering stiffness at the same load.
+ *
+ * Leaving it out made the car statically directionally unstable, and the arithmetic
+ * is worth writing down because it is not obvious from driving:
+ *
+ *   Directional stability needs `C_rear · LR > C_front · LF`. The CoG sits at
+ *   0.54·WB from the front axle, so `LF/LR = 1.174` — the rear must produce 17%
+ *   more cornering force per radian than the front just to break even. With one
+ *   tyre at all four corners the rear's only advantage is its 8% larger share of
+ *   the load, worth 7% of grip after load sensitivity. 1.07 < 1.174, so the car
+ *   turned *away* from its own velocity vector: a spin divergence, measured as
+ *   positive feedback at every sideslip angle from 1° to 20°.
+ *
+ * 15% for a third more width is conservative — grip grows sub-linearly with
+ * contact area, exactly as it does with load.
+ */
+export const TYRE_WIDTH_FRONT = 0.305;
+export const TYRE_WIDTH_REAR = 0.405;
+export const MU_SCALE_FRONT = 1.0;
+export const MU_SCALE_REAR = 1.15;
+export const muScaleFor = front => (front ? MU_SCALE_FRONT : MU_SCALE_REAR);
+
+/**
  * Peak force available at a given load.
  *
  * `D = μ · Fz · (Fz / Fz_ref)^(k − 1)` with k ≈ 0.85. Grip growing sub-linearly

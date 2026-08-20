@@ -6,7 +6,7 @@ import { peakGrip, WHEEL_RADIUS } from './wheel.js';
 export { TRACK_HALF } from './loadTransfer.js';
 export { WHEEL_RADIUS } from './wheel.js';
 
-export const MU = { tarmac: 1.6, kerb: 1.2, grass: 0.35 };
+export const MU = { tarmac: 1.85, kerb: 1.35, grass: 0.40 };
 
 export const MASS = 800;
 export const WB = 3.3928;

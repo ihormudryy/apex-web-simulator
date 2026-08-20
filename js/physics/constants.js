@@ -1,6 +1,16 @@
 // Shared F1 vehicle constants — imported by the four-wheel kernel and UI.
 
-export const MU = { tarmac: 1.6, kerb: 1.2, grass: 0.35 };
+/**
+ * Peak friction coefficients at the reference load.
+ *
+ * Tarmac was 1.6, which was tuned against a model with no wheel locking, no
+ * per-axle tyre difference and a lumped friction clip. Measured properly against
+ * the reference table it caps the car at 1.93 g of lateral and 1.6 g of braking,
+ * where the targets are 2.2 g and 2.3 g. A warm F1 slick is commonly put at
+ * 1.7-2.0 at racing loads, so 1.85 is inside the credible range and is what the
+ * reference figures actually need.
+ */
+export const MU = { tarmac: 1.85, kerb: 1.35, grass: 0.40 };
 
 export const MASS = 800;
 export const WB = 3.3928;
