@@ -8,6 +8,7 @@ import {
   hubBaseY, chassisAttitudeRotation, staticRakePitch,
   wheelRootPosition, suspensionHubOffset, TYRE_CONTACT_RADIUS, IS_FRONT,
   AUTHORED_HUB_FORWARD, MESH_FORWARD_OFFSET, AUTHORED_TRACK_HALF,
+  tyreSquash, tyreSquashScales, tyreSquashDrop,
 } from './wheelVisual.js';
 
 test('front hubs sit lower than rear hubs for static rake', () => {
@@ -55,6 +56,29 @@ test('wheels are drawn on the authored track, inboard of the physics track', () 
   // 11 cm of daylight between every wheel and its suspension.
   assert.equal(AUTHORED_TRACK_HALF, 0.69);
   assert.ok(AUTHORED_TRACK_HALF < Math.abs(WHEEL_Y[0]), 'drawn wheels sit inboard of the physics track');
+});
+
+test('tyre squash keeps the contact patch on the road', () => {
+  // The squash scales the tyre mesh about the wheel centre, which alone would
+  // lift the flattened tyre's bottom off the road. The wheel centre therefore
+  // drops by exactly the radius the bottom loses, for any squash in range —
+  // loaded (positive) or drooping (negative).
+  for (const def of [-0.5, -0.3, -0.1, 0, 0.2, 0.5, 0.8, 1.2]) {
+    const s = tyreSquash(def);
+    const hub = TYRE_CONTACT_RADIUS - tyreSquashDrop(s);
+    const bottom = hub - TYRE_CONTACT_RADIUS * tyreSquashScales(s).y;
+    assert.ok(Math.abs(bottom) < 1e-12, `def ${def}: bottom ${bottom} must stay at 0`);
+  }
+});
+
+test('tyre squash clamps match the authored range', () => {
+  // Two clamp stages, faithfully: deflection to [-0.3, 0.8], then the squash
+  // itself to [-0.02, 0.05] — the deflection clamp is the binding one.
+  assert.ok(Math.abs(tyreSquash(2) - 0.8 * 0.035) < 1e-12);
+  assert.ok(Math.abs(tyreSquash(-1) - -0.3 * 0.035) < 1e-12);
+  assert.equal(tyreSquash(0), 0);
+  assert.ok(tyreSquash(0.4) > 0 && tyreSquashDrop(tyreSquash(0.4)) > 0,
+    'load squashes and drops the hub');
 });
 
 test('tyres touch the road: contact radius equals the authored tyre radius', () => {

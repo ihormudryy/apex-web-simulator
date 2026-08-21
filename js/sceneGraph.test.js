@@ -21,11 +21,12 @@ import { Car } from './Car.js';
 import { unpackBinMesh } from './binMesh.js';
 import { buildCenterline } from './track/centerline.js';
 import { SILVERSTONE_WAYPOINTS } from './track/silverstoneWaypoints.js';
-import { LF, LR } from './physics/constants.js';
+import { LF, LR, MASS, G, WB } from './physics/constants.js';
 import { WHEEL_RADIUS } from './physics/wheel.js';
 import {
   TYRE_CONTACT_RADIUS, AUTHORED_TRACK_HALF, MESH_FORWARD_OFFSET,
   chassisAttitudeRotation, staticRakePitch, WHEEL_MESH_YAW,
+  suspensionHubOffset, tyreSquash, tyreSquashDrop,
 } from './render/wheelVisual.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -222,6 +223,43 @@ test('the body sits nose-down at rest and rolls right-side-down on positive roll
   car.root.updateMatrixWorld(true);
   const rakeOnly = chassisAttitudeRotation(0, 0);
   assert.ok(dive.x < rakeOnly.x && y(nose) < y(tail), 'braking dives the nose further');
+});
+
+test('under aero load the hubs drop by the tyre squash, keeping contact', () => {
+  // At speed the downforce loads the tyres past their static Fz; the squash
+  // flattens the mesh about the wheel centre, so the centre must sink by the
+  // radius the bottom loses. Full throttle down the Hamilton straight builds
+  // real aero load; the hub height is then checked against the same kernel
+  // loads and helpers the renderer uses.
+  const scene = new THREE.Scene();
+  const car = new Car(scene, { backend: 'webgl' });
+  const track = flatSilverstone();
+  const s = track.centerline.samples[0];
+  car.resetRace(s.x, s.z, Math.atan2(-s.tx, -s.tz));
+  car.input.forward = true;
+  for (let i = 0; i < 360; i++) { // 3 s flat out
+    car.updateSteering(1 / 120);
+    car.updatePhysics(1 / 120, track);
+  }
+  assert.ok(car.speed() > 20, 'the car got up to speed');
+
+  const sim = car.simState();
+  const susp = car.vehicle.car.suspension;
+  const baseFzF = MASS * G * LR / WB;
+  const squashF = tyreSquash((sim.fz[0] + sim.fz[1] - baseFzF) / baseFzF);
+  assert.ok(squashF > 0.001, 'aero load squashes the front tyres');
+
+  // Wheel local y is ground-anchored: contact radius above the (flat, 0-high)
+  // road minus the chassis height the root already carries, plus the live
+  // suspension offset — and now minus the squash drop.
+  const wheels = [car.lfw, car.rfw];
+  for (let i = 0; i < 2; i++) {
+    const expected = TYRE_CONTACT_RADIUS - sim.chassisY
+      + suspensionHubOffset(susp, i) - tyreSquashDrop(squashF);
+    assert.ok(Math.abs(wheels[i].position.y - expected) < 1e-9,
+      `front hub ${wheels[i].position.y.toFixed(4)} vs ${expected.toFixed(4)} — `
+      + 'a loaded tyre must sink, not shrink in place');
+  }
 });
 
 test('the front wheels steer and the rears do not', () => {

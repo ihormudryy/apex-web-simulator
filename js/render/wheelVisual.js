@@ -116,6 +116,38 @@ export function wheelRootPosition(i, surface, chassisY) {
   };
 }
 
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+/**
+ * Tyre carcass squash factor from the axle's load deflection.
+ *
+ * `def` is (Fz − staticFz) / staticFz for the axle. Two clamp stages,
+ * faithfully ported from the original: deflection to [-0.3, 0.8], then the
+ * squash itself to [-0.02, 0.05] — the deflection clamp is the binding one.
+ */
+export function tyreSquash(def) {
+  return clamp(clamp(def, -0.3, 0.8) * 0.035, -0.02, 0.05);
+}
+
+/** Mesh scale for a squashed tyre: flattened vertically, bulged along x/z. */
+export function tyreSquashScales(squash) {
+  return { y: 1 - squash, xz: 1 + squash * 0.35 };
+}
+
+/**
+ * How far the wheel centre drops when the tyre squashes, m.
+ *
+ * The squash scales the tyre mesh about the wheel centre, which alone lifts
+ * the flattened tyre's bottom off the road — the same floating-tyre artifact
+ * as a wrong contact radius, reappearing under load. Physically the carcass
+ * compresses and the axle sinks: dropping the centre by exactly the radius
+ * the bottom loses keeps the contact patch planted for any squash,
+ * loaded or drooping.
+ */
+export function tyreSquashDrop(squash) {
+  return squash * TYRE_CONTACT_RADIUS;
+}
+
 /**
  * Live suspension offset along world vertical, for subtle compression visuals.
  * @param {{ zc: number, pitch: number, roll: number, zw: number[] }} susp

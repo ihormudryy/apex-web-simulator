@@ -21,6 +21,7 @@ import { enableCarParticleSystems } from './render/carParticleBackend.js';
 import {
   hubBaseY, chassisAttitudeRotation, wheelRootPosition, suspensionHubOffset,
   MESH_FORWARD_OFFSET, AUTHORED_TRACK_HALF, WHEEL_MESH_YAW,
+  tyreSquash, tyreSquashScales, tyreSquashDrop,
 } from './render/wheelVisual.js';
 import { WHEEL_Y } from './physics/surface.js';
 
@@ -721,13 +722,23 @@ export class Car {
     this.attitude.rotation.x = att.x;
     this.attitude.rotation.z = att.z;
 
+    // Per-axle tyre squash, from the same kernel loads the handling uses. It
+    // is needed here, before the hubs are placed: the squash flattens the tyre
+    // mesh about the wheel centre, so the centre must drop by the radius the
+    // bottom loses or the loaded tyre floats above its own contact patch.
+    const baseFzF = MASS * G * LR / WB;
+    const baseFzR = MASS * G * LF / WB;
+    const squashF = tyreSquash((sim.fz[0] + sim.fz[1] - baseFzF) / baseFzF);
+    const squashR = tyreSquash((sim.fz[2] + sim.fz[3] - baseFzR) / baseFzR);
+
     const susp = v.car.suspension;
     const wheels = [this.lfw, this.rfw, this.lrw, this.rrw];
     for (let i = 0; i < 4; i++) {
       const w = wheels[i];
       if (!w) continue;
       const p = wheelRootPosition(i, v.car.surfaces[i], sim.chassisY);
-      w.position.set(p.x, p.y + suspensionHubOffset(susp, i), p.z);
+      const drop = tyreSquashDrop(i < 2 ? squashF : squashR);
+      w.position.set(p.x, p.y + suspensionHubOffset(susp, i) - drop, p.z);
     }
 
     // Brake glow from disc temperature, which is the same number that sets pad
@@ -757,25 +768,17 @@ export class Car {
     // this reads them instead of inventing them.
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     if (this._tyreMatFront && this._tyreMatRear) {
-      const baseFzF = MASS * G * LR / WB;
-      const baseFzR = MASS * G * LF / WB;
-      const FzF = sim.fz[0] + sim.fz[1];
-      const FzR = sim.fz[2] + sim.fz[3];
-
-      const defF = clamp((FzF - baseFzF) / baseFzF, -0.3, 0.8);
-      const defR = clamp((FzR - baseFzR) / baseFzR, -0.3, 0.8);
-
-      const setTyreSquash = (meshes, def) => {
-        const squash = clamp(def * 0.035, -0.02, 0.05);
-        const yScale = 1 - squash;
-        const xzScale = 1 + squash * 0.35;
+      // The hub drop above and these scales share one squash value, so the
+      // contact patch stays planted by construction (see tyreSquashDrop).
+      const setTyreSquash = (meshes, squash) => {
+        const s = tyreSquashScales(squash);
         for (const m of meshes) {
           const b = m.userData.baseScale;
-          m.scale.set(b.x * xzScale, b.y * yScale, b.z * xzScale);
+          m.scale.set(b.x * s.xz, b.y * s.y, b.z * s.xz);
         }
       };
-      setTyreSquash(this._tyreMeshesFront, defF);
-      setTyreSquash(this._tyreMeshesRear, defR);
+      setTyreSquash(this._tyreMeshesFront, squashF);
+      setTyreSquash(this._tyreMeshesRear, squashR);
 
       // Heat from the tyre model's own surface temperature, normalised across the
       // band the material shading is authored for. The tyre already has its own
