@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { buildCenterline } from './centerline.js';
 import { ribbonTileUV } from '../render/ribbonUV.js';
 import {
-  tileableHeight, albedoFromHeight, normalFromHeight, roughnessFromHeight,
+  normalFromHeight, roughnessFromHeight,
 } from '../render/asphaltMaps.js';
 import { tileableGrassHeight, grassAlbedoFromHeight } from '../render/grassMaps.js';
 import { lineWearAlbedo, lineWearRoughness } from '../render/lineWearMaps.js';
@@ -35,9 +35,12 @@ const DASH_GAP = 6.0;
 const DASH_WIDTH = 0.14;       // half-width of the centre line
 const EDGE_LINE_WIDTH = 0.1;   // half-width of the white edge line
 const START_LINE_WIDTH = 0.5;
-// One wrap of the asphalt PBR tile. 4 m is a slight stretch so Hamilton
-// Straight does not read as a stamped pattern from the chase cam.
-const ASPHALT_TILE_M = 4;
+// One wrap of the asphalt PBR tile. The Poly Haven `asphalt_track` set is
+// authored at 2 m x 2 m physical scale; wrapping it at its true size keeps
+// the aggregate grain the size real race asphalt has, and the lap-scale
+// variation multiply (racing line, marbles, patches) is what breaks up the
+// repetition the old 4 m stretch used to hide.
+const ASPHALT_TILE_M = 2;
 
 /**
  * Central-difference step for the surface normal, metres. A compromise: smaller
@@ -58,8 +61,8 @@ const KERB_SEGMENTS = 5;
 const GROUND_SEGMENTS = 110;
 // Close runoff: one wrap of the lawn PBR tile. Distant infield uses a longer
 // period so the 1k map does not strobe from the chase cam.
-const GRASS_RUNOFF_TILE_M = 5;
-const GRASS_GROUND_TILE_M = 16;
+const GRASS_RUNOFF_TILE_M = 3.5;
+const GRASS_GROUND_TILE_M = 10;
 
 // Heights, in metres. Ordered so a marking is never below the surface it is
 // painted on.
@@ -411,19 +414,38 @@ export class Track extends THREE.Group {
     return texture;
   }
 
+  /**
+   * Detail maps: the Poly Haven `asphalt_track` PBR set (CC0, Dimitrios
+   * Savva, polyhaven.com/a/asphalt_track) — photoscanned race-track tarmac,
+   * 2K, authored at 2 m physical scale. It replaces the 512 px procedural
+   * noise maps, which read as texture rather than as asphalt up close. The
+   * lap-scale variation multiply and the tyre marks are unchanged — they
+   * address the road by position, not by this tiling UV.
+   */
+  _asphaltDetailTexture(url, colorSpace) {
+    const texture = new THREE.TextureLoader().load(url);
+    texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+    texture.colorSpace = colorSpace;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.anisotropy = 16;
+    return texture;
+  }
+
   _asphaltMaterial() {
-    const size = 512;
-    const height = tileableHeight(size, 3);
     const params = {
-      map: this._asphaltDataTexture(albedoFromHeight(height, size), size, THREE.SRGBColorSpace),
-      // Normal strength was too high (appeared like rippling mud/water).
-      normalMap: this._asphaltDataTexture(normalFromHeight(height, size, 1.2), size, THREE.NoColorSpace),
-      roughnessMap: this._asphaltDataTexture(roughnessFromHeight(height, size), size, THREE.NoColorSpace),
+      map: this._asphaltDetailTexture('obj/textures/track/asphalt_track_diff_2k.jpg', THREE.SRGBColorSpace),
+      normalMap: this._asphaltDetailTexture('obj/textures/track/asphalt_track_nor_gl_2k.jpg', THREE.NoColorSpace),
+      roughnessMap: this._asphaltDetailTexture('obj/textures/track/asphalt_track_rough_2k.jpg', THREE.NoColorSpace),
       color: 0xffffff,
-      roughness: 0.95,
+      // The photoscanned roughness map is authored absolute — pass it through
+      // rather than scaling it down.
+      roughness: 1.0,
       metalness: 0,
       envMapIntensity: 1.0,
-      normalScale: new THREE.Vector2(0.22, 0.22),
+      // Real relief, so far less normal gain than the procedural noise needed;
+      // above ~0.8 the aggregate sparkles at distance.
+      normalScale: new THREE.Vector2(0.7, 0.7),
     };
     const texture = this._asphaltSurfaceVariationTexture();
     const range = {
@@ -532,13 +554,25 @@ export class Track extends THREE.Group {
         // Laid rubber: darker, cooler and smoother than the aggregate under it,
         // which is the same direction the baked line goes and for the same reason.
         float marks = uHasTyreMarks * texture2D( uTyreMarks, vSurfaceUv ).r;
-        diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 0.34, 0.35, 0.38 ), marks );`)
+        diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 0.34, 0.35, 0.38 ), marks );
+        // Macro octave: a second read of the SAME detail map, nine times
+        // larger. The photoscanned tile is pristine tarmac — featureless above
+        // ~0.3 m — so its own low-frequency unevenness, gained up, supplies
+        // the worked-in patchiness a used circuit has and breaks the 2 m
+        // tiling. 0.0136 is the map's measured mean linear luminance; the
+        // deviation is amplified because the source is authored near-uniform.
+        float macroLum = dot( texture2D( map, vMapUv * 0.111 ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+        float macroDev = macroLum / 0.0136 - 1.0;
+        diffuseColor.rgb *= clamp( 1.0 + macroDev * 3.5, 0.72, 1.35 );`)
         // `surf` is still in scope here: both chunks expand inside main(), and
         // roughnessmap_fragment follows map_fragment. Re-fetching the same texel
         // cost a second dependent read per fragment across the whole track.
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         roughnessFactor *= ${roughMin} + surf.g * ${roughSpan};
-        roughnessFactor *= mix( 1.0, 0.72, marks );`);
+        roughnessFactor *= mix( 1.0, 0.72, marks );
+        // Brighter macro patches are worn, polished asphalt: lighter AND
+        // smoother, so the sun response varies with the mottling.
+        roughnessFactor *= clamp( 1.0 - macroDev * 1.8, 0.85, 1.12 );`);
     };
 
     // CSM assigns its own onBeforeCompile to every standard material in the
@@ -567,11 +601,11 @@ export class Track extends THREE.Group {
   }
 
   _grassMaterial({ repeatU = 1, repeatV = 1 } = {}) {
-    const size = 512;
+    const size = 1024;
     const height = tileableGrassHeight(size, 11);
     const mat = new THREE.MeshStandardMaterial({
       map: this._asphaltDataTexture(grassAlbedoFromHeight(height, size), size, THREE.SRGBColorSpace),
-      normalMap: this._asphaltDataTexture(normalFromHeight(height, size, 1.6), size, THREE.NoColorSpace),
+      normalMap: this._asphaltDataTexture(normalFromHeight(height, size, 1.85), size, THREE.NoColorSpace),
       roughnessMap: this._asphaltDataTexture(roughnessFromHeight(height, size), size, THREE.NoColorSpace),
       // Neutral: grassAlbedoFromHeight already returns finished lawn colour.
       // A green tint here multiplied the greens and crushed red/blue to emerald.
@@ -579,10 +613,11 @@ export class Track extends THREE.Group {
       roughness: 0.92,
       metalness: 0,
       envMapIntensity: 0.85,
-      normalScale: new THREE.Vector2(0.35, 0.35),
+      normalScale: new THREE.Vector2(0.55, 0.55),
     });
     for (const t of [mat.map, mat.normalMap, mat.roughnessMap]) {
       t.repeat.set(repeatU, repeatV);
+      t.anisotropy = 16;
     }
     this._tryBindGrassFiles(mat, repeatU, repeatV);
     return mat;
@@ -593,17 +628,23 @@ export class Track extends THREE.Group {
     const bind = (url, colorSpace, key) => {
       loader.load(url, tex => {
         tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.anisotropy = 8;
+        tex.anisotropy = 16;
         tex.colorSpace = colorSpace;
         tex.repeat.set(repeatU, repeatV);
         mat[key] = tex;
+        if (key === 'normalMap') mat.normalScale.set(0.7, 0.7);
         mat.needsUpdate = true;
+      }, undefined, () => {
+        // Fall back to 1k Polyhaven maps if 2k is missing after a fresh clone.
+        if (url.includes('_2k.')) {
+          bind(url.replace('_2k.', '_1k.').replace('/2k/', '/1k/'), colorSpace, key);
+        }
       });
     };
     // Albedo stays the generated cool green. leafy_grass_diff is brown leaf
     // litter; under ACES it reads as sand. Keep only its micro-normal/roughness.
-    bind('obj/textures/grass/leafy_grass_nor_gl_1k.jpg', THREE.NoColorSpace, 'normalMap');
-    bind('obj/textures/grass/leafy_grass_rough_1k.jpg', THREE.NoColorSpace, 'roughnessMap');
+    bind('obj/textures/grass/leafy_grass_nor_gl_2k.jpg', THREE.NoColorSpace, 'normalMap');
+    bind('obj/textures/grass/leafy_grass_rough_2k.jpg', THREE.NoColorSpace, 'roughnessMap');
   }
 
   /**

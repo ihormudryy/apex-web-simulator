@@ -19,6 +19,7 @@ import * as THREE from 'three';
 import {
   attribute, texture, materialColor, materialRoughness,
   float, vec2, vec3, mix, sin, cos, clamp, uniform, positionLocal, time,
+  uv, dot,
 } from 'three/tsl';
 
 /**
@@ -47,11 +48,24 @@ export function createAsphaltNodeMaterial(params, surfaceTexture, range) {
   // was a racing line 19% *brighter* than the track edges. `luminance()` has the
   // same problem on a vec4; `.rgb` first is the fix if a luminance is ever wanted.
   const rubberTint = mix(vec3(1.0), vec3(0.93, 0.97, 1.05), surf.b);
-  material.colorNode = materialColor.mul(albedoMul).mul(rubberTint);
 
+  // Macro octave — the same trick as the WebGL inject in Track.js: a second
+  // read of the detail map at nine times the scale. The photoscanned tile is
+  // pristine tarmac, featureless above ~0.3 m, so its own low-frequency
+  // unevenness (0.0136 measured mean linear luminance), gained up, supplies
+  // the worked-in patchiness of a used circuit and breaks the 2 m tiling.
+  const macroTexel = texture(params.map, uv().mul(float(0.111)));
+  const macroDev = dot(macroTexel.rgb, vec3(0.2126, 0.7152, 0.0722))
+    .div(float(0.0136)).sub(float(1.0));
+  const macroMul = clamp(macroDev.mul(float(3.5)).add(float(1.0)), 0.72, 1.35);
+  material.colorNode = materialColor.mul(albedoMul).mul(rubberTint).mul(macroMul);
+
+  // Brighter macro patches are worn, polished asphalt: lighter AND smoother,
+  // so the sun response varies with the mottling.
+  const macroRough = clamp(float(1.0).sub(macroDev.mul(float(1.8))), 0.85, 1.12);
   material.roughnessNode = materialRoughness.mul(
     float(range.roughMin).add(surf.g.mul(float(range.roughSpan))),
-  );
+  ).mul(macroRough);
   return material;
 }
 
