@@ -5,6 +5,7 @@
 
 import {
   defaultRenderValues,
+  FX_FLAGS,
   RENDER_SLIDERS,
   sanitizeRenderValues,
 } from './renderPanelState.js';
@@ -175,6 +176,24 @@ const TOGGLE_ROWS = [
   { key: 'grade', label: 'Grade', hint: 'G' },
 ];
 
+/** WebGPU only, apart from bloom — see `_fx` in HelloRacer. */
+const CINEMATIC_TOGGLE_ROWS = [
+  { key: 'motionBlur', label: 'Motion blur', hint: '4' },
+  { key: 'bloom', label: 'Bloom', hint: '5' },
+  { key: 'flare', label: 'Lens flare', hint: '' },
+  { key: 'dof', label: 'Depth of field', hint: '6' },
+];
+
+const CINEMATIC_SLIDER_ROWS = [
+  { key: 'motionBlurStrength', label: 'Blur amount' },
+  { key: 'bloomStrength', label: 'Bloom' },
+  { key: 'bloomRadius', label: 'Bloom radius' },
+  { key: 'bloomThreshold', label: 'Bloom threshold' },
+  { key: 'flareAmount', label: 'Flare' },
+  { key: 'dofRange', label: 'Focus falloff' },
+  { key: 'dofBokeh', label: 'Bokeh' },
+];
+
 /**
  * @typedef {ReturnType<typeof defaultRenderValues>} RenderValues
  */
@@ -240,6 +259,19 @@ export class RenderPanel {
     fxSection.append(el('div', 'rpanel__hint', 'Keys 1 · 2 · 3 · T · G sync here'));
     this._body.append(fxSection);
 
+    const cineSection = el('div', 'rpanel__section');
+    cineSection.append(el('div', 'rpanel__section-label', 'Cinematic'));
+    const cineToggles = el('div', 'rpanel__toggles');
+    for (const row of CINEMATIC_TOGGLE_ROWS) {
+      cineToggles.append(this._makeToggle(row.key, row.label, row.hint));
+    }
+    cineSection.append(cineToggles);
+    for (const row of CINEMATIC_SLIDER_ROWS) {
+      cineSection.append(this._makeSlider(row.key, row.label));
+    }
+    cineSection.append(el('div', 'rpanel__hint', 'Keys 4 · 5 · 6 sync here'));
+    this._body.append(cineSection);
+
     shell.append(this._head, this._body);
     this.root.append(shell);
     container.appendChild(this.root);
@@ -267,7 +299,7 @@ export class RenderPanel {
    * @param {Partial<Pick<RenderValues, 'ssao' | 'bounce' | 'csm' | 'taa' | 'grade'>>} fx
    */
   syncFx(fx) {
-    for (const key of ['ssao', 'bounce', 'csm', 'taa', 'grade']) {
+    for (const key of FX_FLAGS) {
       if (fx[key] === undefined) continue;
       const on = Boolean(fx[key]);
       this._values[key] = on;

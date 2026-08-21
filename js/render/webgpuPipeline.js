@@ -10,6 +10,10 @@ import { sharpen } from 'three/addons/tsl/display/SharpenNode.js';
 import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
 import { setSunLightDirection } from './sunLightDirection.js';
 import { SUN_INTENSITY, SHADOW_INTENSITY } from './lightingBalance.js';
+import {
+  createCinematicUniforms, buildCinematicOutput,
+} from './cinematicPost.js';
+import { cinematicFeatures, featuresEqual } from './cinematicState.js';
 
 export { setSunLightDirection } from './sunLightDirection.js';
 
@@ -80,6 +84,8 @@ function buildFullWebGpuPost(THREE, renderer, scene, camera, aoEnabled, giEnable
   aoBlend = 0.45,
   giStrength = 0.2,
   sharpenAmount = 0.62,
+  cinematicUniforms,
+  features,
 } = {}) {
   const renderPipeline = new THREE.RenderPipeline(renderer);
 
@@ -132,8 +138,68 @@ function buildFullWebGpuPost(THREE, renderer, scene, camera, aoEnabled, giEnable
   const traaPass = traa(composite, prePassDepth, prePassVelocity, camera);
   traaPass.useSubpixelCorrection = false;
 
-  renderPipeline.outputNode = sharpen(traaPass, float(sharpenAmount));
-  return { renderPipeline, aoPass };
+  // Sharpen sits here, immediately after TRAA, because that is what it is for —
+  // putting back the edge TRAA's history blend takes off. The cinematic tail
+  // then runs on a resolved, sharp image.
+  const sharpened = sharpen(traaPass, float(sharpenAmount));
+  const tail = attachCinematicTail(renderPipeline, {
+    color: sharpened,
+    velocity: prePassVelocity,
+    viewZ: scenePass.getViewZNode(),
+  }, cinematicUniforms, features);
+
+  return { renderPipeline, aoPass, rebuildTail: tail.rebuild };
+}
+
+/**
+ * Set `pipeline.outputNode` to the cinematic tail, and hand back a rebuild for
+ * when a feature toggle changes the graph's shape.
+ *
+ * @returns {{ rebuild: (features: object) => boolean }}
+ */
+function attachCinematicTail(pipeline, parts, uniforms, initialFeatures) {
+  let current = initialFeatures;
+  const build = features => {
+    pipeline.outputNode = buildCinematicOutput({ ...parts, uniforms, features });
+  };
+  build(current);
+  return {
+    rebuild(next) {
+      if (featuresEqual(current, next)) return false;
+      current = next;
+      build(next);
+      // Documented as "must be set to true when the output node changes".
+      pipeline.needsUpdate = true;
+      return true;
+    },
+  };
+}
+
+/**
+ * The cheap tier: one scene pass that also writes velocity, then the cinematic
+ * tail. No GTAO, no SSGI, no TRAA.
+ *
+ * This exists because the full stack above is roughly twice the scene cost and
+ * is opt-in behind the AO toggle — but bloom and motion blur are the default
+ * look, and they only need colour, depth and velocity. Velocity is free here:
+ * it is one more MRT target on a pass that was already being drawn, rather than
+ * the separate pre-pass the AO tier needs.
+ *
+ * @param {typeof import('three/webgpu')} THREE
+ */
+function buildCinematicWebGpuPost(THREE, renderer, scene, camera, cinematicUniforms, features) {
+  const pipeline = new THREE.RenderPipeline(renderer);
+
+  const scenePass = pass(scene, camera);
+  scenePass.setMRT(mrt({ output, velocity }));
+
+  const tail = attachCinematicTail(pipeline, {
+    color: scenePass.getTextureNode('output'),
+    velocity: scenePass.getTextureNode('velocity'),
+    viewZ: scenePass.getViewZNode(),
+  }, cinematicUniforms, features);
+
+  return { pipeline, rebuildTail: tail.rebuild };
 }
 
 /**
@@ -184,16 +250,54 @@ export function createWebGpuPost(THREE, renderer, scene, camera, options = {}) {
   const giEnabled = uniform(1);
   const controller = makePostController(aoEnabled, giEnabled);
 
+  // One set of uniforms for both tiers, so a slider moves whichever is running.
+  const cinematicUniforms = createCinematicUniforms(options.values ?? {});
+  let features = cinematicFeatures(options.values ?? {});
+  const buildOptions = { ...options, cinematicUniforms, features };
+
   let built;
   try {
-    built = buildFullWebGpuPost(THREE, renderer, scene, camera, aoEnabled, giEnabled, options);
+    built = buildFullWebGpuPost(THREE, renderer, scene, camera, aoEnabled, giEnabled, buildOptions);
   } catch (err) {
     console.warn('[HelloRacer] Full WebGPU post stack unavailable, using basic GTAO + TRAA:', err);
-    built = buildBasicWebGpuPost(THREE, renderer, scene, camera, aoEnabled, giEnabled, options);
+    built = buildBasicWebGpuPost(THREE, renderer, scene, camera, aoEnabled, giEnabled, buildOptions);
   }
+
+  // Built on first use rather than at boot: the cheap tier is what the default
+  // look runs on, but compiling both stacks up front would stall the first
+  // frame for a pipeline the player may never switch to.
+  let cinematic = null;
+  let cinematicUnavailable = false;
+  const getCinematicPipeline = () => {
+    if (cinematic || cinematicUnavailable) return cinematic;
+    try {
+      cinematic = buildCinematicWebGpuPost(
+        THREE, renderer, scene, camera, cinematicUniforms, features,
+      );
+    } catch (err) {
+      console.warn('[HelloRacer] Cinematic post stack unavailable:', err);
+      cinematicUnavailable = true;
+    }
+    return cinematic;
+  };
 
   return {
     ...built,
     ...controller,
+    cinematicUniforms,
+    getCinematicPipeline,
+    getCinematicFeatures: () => features,
+    /**
+     * Apply feature toggles. Returns true when a graph was rebuilt, which the
+     * caller can treat as "expect one hitched frame".
+     */
+    setCinematicFeatures(values) {
+      const next = cinematicFeatures(values);
+      if (featuresEqual(features, next)) return false;
+      features = next;
+      built.rebuildTail?.(next);
+      cinematic?.rebuildTail?.(next);
+      return true;
+    },
   };
 }

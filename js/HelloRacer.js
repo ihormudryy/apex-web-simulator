@@ -5,6 +5,13 @@ import { Car } from './Car.js';
 import { createSilverstone } from './track/Silverstone.js';
 import { RenderPanel } from './render/RenderPanel.js';
 import { defaultRenderValues } from './render/renderPanelState.js';
+import {
+  BLOOM_INPUT_CLAMP, CINEMATIC_DEFAULTS, CINEMATIC_SLIDERS, WEBGL_BLOOM_SCALE,
+  focusDistanceFor,
+} from './render/cinematicState.js';
+import {
+  applyCinematicValues, setCinematicFocus,
+} from './render/cinematicPost.js';
 import { nextCameraMode, DRIVER_CAMERA, CAMERA_NEAR, adjustChaseZoom, CHASE_ZOOM } from './cameraModes.js';
 import {
   createChassisCamera, updateChassisCamera, speedFov,
@@ -188,7 +195,25 @@ class HelloRacer {
        * luminance and the saturation where they already measured correctly.
        */
       grade: true,
+      /**
+       * Cinematic post: velocity-driven motion blur, bloom, lens flare, DoF.
+       *
+       * On the WebGPU path these live in a node graph whose tail is rebuilt
+       * when one of these flags changes (see `cinematicPost.js`), so each one
+       * is genuinely absent from the shader when off rather than multiplied by
+       * zero. Bloom and motion blur are the default look; depth of field is a
+       * replay effect and stays off until asked for.
+       *
+       * On WebGL only bloom is available — motion blur and DoF need the
+       * per-pixel velocity buffer, and the WebGL composer has no pre-pass that
+       * writes one. That asymmetry is the reason WebGPU is the default.
+       */
+      motionBlur: CINEMATIC_DEFAULTS.motionBlur,
+      bloom: CINEMATIC_DEFAULTS.bloom,
+      flare: CINEMATIC_DEFAULTS.flare,
+      dof: CINEMATIC_DEFAULTS.dof,
     };
+    this._bloomPass = null;
 
     this._lastTime = 0;
     this._animate = this._animate.bind(this);
@@ -482,7 +507,20 @@ class HelloRacer {
       case 'grade':
         this._setFxGrade(value);
         break;
+      case 'motionBlur':
+        this._setFxMotionBlur(value);
+        break;
+      case 'bloom':
+        this._setFxBloom(value);
+        break;
+      case 'flare':
+        this._setFxFlare(value);
+        break;
+      case 'dof':
+        this._setFxDof(value);
+        break;
       default:
+        if (key in CINEMATIC_SLIDERS) this._applyCinematicSlider(key, value);
         break;
     }
   }
@@ -572,6 +610,7 @@ class HelloRacer {
     const { RenderPass } = await import('three/addons/postprocessing/RenderPass.js');
     const { GTAOPass } = await import('three/addons/postprocessing/GTAOPass.js');
     const { OutputPass } = await import('three/addons/postprocessing/OutputPass.js');
+    const { UnrealBloomPass } = await import('three/addons/postprocessing/UnrealBloomPass.js');
     const { Pass, FullScreenQuad } = await import('three/addons/postprocessing/Pass.js');
     const { createTaaPass } = await import('./render/taaPass.js');
     const { createGradingPass } = await import('./render/gradingPass.js');
@@ -641,6 +680,43 @@ class HelloRacer {
     this._taaPass.enabled = this._fx.taa;
     this._composer.addPass(this._taaPass);
 
+    /**
+     * Bloom, ahead of `OutputPass` so it thresholds **linear HDR** rather than
+     * the display-referred 0..1 that ACES hands out. This is the same reasoning
+     * the grading pass records for sitting on the other side of the line, and it
+     * matters more here: after tone mapping nothing exceeds 1, so an HDR
+     * threshold would either catch everything or nothing.
+     *
+     * The WebGL tier is bloom only. Motion blur and depth of field need the
+     * per-pixel velocity and view-depth buffers, which the WebGPU pre-pass
+     * writes as MRT targets and this composer has no equivalent for.
+     */
+    this._bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(size.x, size.y),
+      CINEMATIC_DEFAULTS.bloomStrength * WEBGL_BLOOM_SCALE,
+      CINEMATIC_DEFAULTS.bloomRadius,
+      CINEMATIC_DEFAULTS.bloomThreshold,
+    );
+    /**
+     * Clamp what the bright-pass sees — the same fix as the WebGPU tail, and
+     * for the same measured reason: the sun in the shipped HDRI is 72,559 in
+     * linear units, `UnrealBloomPass` has no clamp of its own, and no threshold
+     * can help because the high-pass keeps the whole value rather than the
+     * excess. Without this the WebGL frame renders pure white.
+     *
+     * Patched onto the high-pass material only, so the scene image keeps its
+     * full HDR range for ACES to roll off.
+     */
+    this._bloomPass.materialHighPassFilter.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        'vec4 texel = texture2D( tDiffuse, vUv );',
+        `vec4 texel = min( texture2D( tDiffuse, vUv ), vec4( ${BLOOM_INPUT_CLAMP.toFixed(1)} ) );`,
+      );
+    };
+    this._bloomPass.materialHighPassFilter.needsUpdate = true;
+    this._bloomPass.enabled = this._fx.bloom;
+    this._composer.addPass(this._bloomPass);
+
     this._composer.addPass(new OutputPass());
 
     /**
@@ -680,7 +756,10 @@ class HelloRacer {
     this._csm = csm;
     this._applySunAndShadow();
 
-    const post = createWebGpuPost(THREE, this.renderer, this.scene, this.camera);
+    const post = createWebGpuPost(THREE, this.renderer, this.scene, this.camera, {
+      // `_fx` carries the toggles, CINEMATIC_DEFAULTS the slider values.
+      values: { ...CINEMATIC_DEFAULTS, ...this._fx },
+    });
     this._webgpuPost = post;
     this._aoPass = post.aoPass;
     // Full post stack is expensive — only wired when GTAO is toggled on (`1`).
@@ -700,6 +779,57 @@ class HelloRacer {
     } else if (post.aoEnabled) {
       post.aoEnabled.value = on ? 1 : 0;
     }
+  }
+
+  /** Is any effect that needs the cinematic node graph switched on? */
+  _wantsCinematicPass() {
+    if (this._rendererBackend !== 'webgpu' || !this._webgpuPost) return false;
+    // `flare` is generated from the bloom texture, so it cannot pull the pass
+    // in on its own — see `cinematicFeatures`.
+    return this._fx.motionBlur || this._fx.bloom || this._fx.dof;
+  }
+
+  /**
+   * Point the lens at the car.
+   *
+   * Depth of field wants a focus plane in metres, and the plane worth having is
+   * whatever the broadcast camera would be focused on: the car. Driving it from
+   * the live camera-to-car distance keeps the car sharp while the barriers and
+   * the kerb either side of it go soft, which is the whole effect.
+   */
+  _updateCinematicFocus() {
+    const uniforms = this._webgpuPost?.cinematicUniforms;
+    if (!uniforms || !this._fx.dof || !this.car || !this.camera) return;
+    setCinematicFocus(
+      uniforms,
+      focusDistanceFor(this.camera.position, this.car.root.position),
+    );
+  }
+
+  /**
+   * Flip one cinematic effect. On WebGPU this rebuilds the node graph, so the
+   * disabled effect's taps leave the shader entirely rather than being
+   * multiplied by zero — one hitched frame, then the cost is gone.
+   */
+  _setCinematicFlag(key, on) {
+    this._fx[key] = Boolean(on);
+    this._webgpuPost?.setCinematicFeatures(this._fx);
+    if (key === 'bloom' && this._bloomPass) this._bloomPass.enabled = this._fx.bloom;
+    this.renderPanel?.syncFx({ [key]: this._fx[key] });
+  }
+
+  _setFxMotionBlur(on) { this._setCinematicFlag('motionBlur', on); }
+  _setFxBloom(on) { this._setCinematicFlag('bloom', on); }
+  _setFxFlare(on) { this._setCinematicFlag('flare', on); }
+  _setFxDof(on) { this._setCinematicFlag('dof', on); }
+
+  /** Cinematic sliders are uniforms on WebGPU and pass fields on WebGL. */
+  _applyCinematicSlider(key, value) {
+    applyCinematicValues(this._webgpuPost?.cinematicUniforms, { [key]: value });
+    if (!this._bloomPass) return;
+    if (key === 'bloomStrength') this._bloomPass.strength = value * WEBGL_BLOOM_SCALE;
+    if (key === 'bloomRadius') this._bloomPass.radius = value;
+    if (key === 'bloomThreshold') this._bloomPass.threshold = value;
   }
 
   _setupMouseControls() {
@@ -917,9 +1047,19 @@ class HelloRacer {
     // work with TAA off as well as on.
     this._applyJitter();
 
+    this._updateCinematicFocus();
+
     if (this._fx.ssao && this._webgpuPost?.renderPipeline) {
       this._setWebGpuAoEnabled(true);
       this._webgpuPost.renderPipeline.render();
+    } else if (this._wantsCinematicPass()) {
+      // The cheap tier — scene plus velocity plus the cinematic tail. Without
+      // this branch the whole node graph was reachable only behind the AO
+      // toggle, so the default frame was a plain forward render with no post
+      // at all: no bloom, no motion blur, and no velocity buffer to blur with.
+      const cine = this._webgpuPost.getCinematicPipeline();
+      if (cine) cine.pipeline.render();
+      else this.renderer.render(this.scene, this.camera);
     } else if (this._composer
       && (this._fx.ssao || this._fx.taa || this._fx.grade)) {
       this._composer.render(dt);
@@ -1248,6 +1388,18 @@ class HelloRacer {
     }
     if (e.code === 'Digit3') {
       if (!e.repeat) this._setFxCsm(!this._fx.csm);
+      return;
+    }
+    if (e.code === 'Digit4') {
+      if (!e.repeat) this._setFxMotionBlur(!this._fx.motionBlur);
+      return;
+    }
+    if (e.code === 'Digit5') {
+      if (!e.repeat) this._setFxBloom(!this._fx.bloom);
+      return;
+    }
+    if (e.code === 'Digit6') {
+      if (!e.repeat) this._setFxDof(!this._fx.dof);
       return;
     }
     if (e.code === 'KeyC') {

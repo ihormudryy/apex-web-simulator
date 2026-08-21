@@ -11,9 +11,15 @@ import {
   SUN_INTENSITY,
   TONE_EXPOSURE,
 } from './lightingBalance.js';
+import {
+  CINEMATIC_DEFAULTS, CINEMATIC_SLIDERS, CINEMATIC_TOGGLES,
+} from './cinematicState.js';
 
 export const DEFAULT_REFLECTIVITY = 0.45;
 export const DEFAULT_AO_BLEND = 0.45;
+
+/** Every FX checkbox, lighting and cinematic alike. */
+export const FX_FLAGS = ['ssao', 'bounce', 'csm', 'taa', 'grade', ...CINEMATIC_TOGGLES];
 
 export const RENDER_SLIDERS = {
   toneExposure: { min: 0.2, max: 2.5, step: 0.01 },
@@ -24,6 +30,7 @@ export const RENDER_SLIDERS = {
   rimIntensity: { min: 0, max: 1.5, step: 0.01 },
   reflectivity: { min: 0, max: 1, step: 0.01 },
   aoBlend: { min: 0, max: 1, step: 0.01 },
+  ...CINEMATIC_SLIDERS,
 };
 
 /**
@@ -64,6 +71,7 @@ export function defaultRenderValues(backend = 'webgpu') {
     csm: true,
     taa: false,
     grade: true,
+    ...CINEMATIC_DEFAULTS,
   };
 }
 
@@ -76,7 +84,7 @@ export function sanitizeRenderValues(values) {
   for (const [key, range] of Object.entries(RENDER_SLIDERS)) {
     if (key in out) out[key] = clampRange(out[key], range.min, range.max);
   }
-  for (const key of ['ssao', 'bounce', 'csm', 'taa', 'grade']) {
+  for (const key of FX_FLAGS) {
     if (key in out) out[key] = Boolean(out[key]);
   }
   return out;
