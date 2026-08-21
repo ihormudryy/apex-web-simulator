@@ -32,10 +32,6 @@ import {
 } from './render/lightingBalance.js';
 import { EngineAudio } from './audio/EngineAudio.js';
 import {
-  createStartLights, advanceStartLights, startInputLocked, jumpStartExpired,
-} from './race/startLights.js';
-import { StartLightsHud } from './dash/StartLightsHud.js';
-import {
   setPose, resetVehicle, createVehicle, replayStep, renderPose, telemetryOf,
 } from './physics/vehicle.js';
 import { resetGhost as resetGhostState } from './physics/ghost.js';
@@ -91,8 +87,7 @@ class HelloRacer {
     this.track = null;
     this.dashboard = null;
     this.controlHints = null;
-    this.startLights = null;
-    this.startLightsHud = null;
+    this._launched = false;
     this.telemetry = null;
     this._camRadius = CHASE_DISTANCE;
     this._pitch = CHASE_PITCH;
@@ -290,8 +285,6 @@ class HelloRacer {
     this.telemetry = createTelemetry({ lapLength: this.track.centerline.length });
     this.dashboard = new Dashboard(container, this.track, { circuitName: 'Silverstone' });
     this.controlHints = new ControlHints(container);
-    this.startLights = createStartLights();
-    this.startLightsHud = new StartLightsHud(container);
 
     // Setup screen. Applying one rebuilds the car, because half of a setup lives in
     // derived state — roll stiffness, corner loads, the suspension's own rates —
@@ -799,39 +792,24 @@ class HelloRacer {
   }
 
   /**
-   * Start procedure: tick the gantry, hold the pedals until lights out, and
-   * turn an early throttle into a jump start that goes back to the grid.
+   * The run starts when the driver does: the lap clock is re-zeroed on the
+   * first throttle after a grid reset, so it reads driving time rather than
+   * however long the car sat parked.
    */
-  _updateStartLights(dt) {
-    const s = this.startLights;
-    if (!s || s.phase === 'done') return;
+  _checkLaunch() {
+    if (this._launched) return;
     const input = this.car.input;
-    const wasGreen = s.phase === 'green';
-    advanceStartLights(s, dt, input.forward || input.reverse);
-    if (startInputLocked(s)) {
-      input.forward = false;
-      input.reverse = false;
-      input.brake = false;
-    }
-    if (!wasGreen && s.phase === 'green') {
-      // The lap clock means nothing while the car sat under red lights.
+    if (input.forward || input.reverse) {
+      this._launched = true;
       this.telemetry.reset?.();
     }
-    if (jumpStartExpired(s)) {
-      this._resetRace();
-      return;
-    }
-    this.startLightsHud?.update(s);
   }
 
   _resetRace() {
     this._clearCarForGridReset();
     this._placeCarOnTrack();
     this.car.restoreMeshDamage();
-    if (this.startLights) {
-      this.startLights = createStartLights();
-      this.startLightsHud?.update(this.startLights);
-    }
+    this._launched = false;
     if (this.telemetry?.reset) this.telemetry.reset();
     this._chaseReady = false;
     this._followYaw = this.car.root.rotation.y;
@@ -873,7 +851,7 @@ class HelloRacer {
     const dt = Math.min((now - this._lastTime) * 0.001, MAX_FRAME_DT);
     this._lastTime = now;
 
-    this._updateStartLights(dt);
+    this._checkLaunch();
     this.car.updateSteering(dt);
     this.car.updatePhysics(dt, this.track);
     // The car's effect set is built on its first physics frame, so the handover of
