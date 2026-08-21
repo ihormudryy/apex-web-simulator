@@ -41,9 +41,15 @@ export class Car {
     scene.add(this.root);
     this._particles = enableCarParticleSystems(backend);
 
+    // Yaw-free pitch/roll carrier. It must sit OUTSIDE visualRoot's constant
+    // 90° yaw: an Euler with y pinned at 90° gimbal-locks its x and z into a
+    // single lateral-axis rotation, so roll was unrenderable there.
+    this.attitude = new THREE.Object3D();
+    this.root.add(this.attitude);
+
     this.visualRoot = new THREE.Object3D();
     this.visualRoot.rotation.y = DEG90;
-    this.root.add(this.visualRoot);
+    this.attitude.add(this.visualRoot);
 
     this.body = new THREE.Object3D();
     this.body.rotation.y = DEG90;
@@ -613,9 +619,12 @@ export class Car {
     const mesh = new THREE.Mesh(this._bodyGeometry.clone(), material);
     const o = this._bodyOffset ?? { x: 0, y: 0, z: 0 };
     mesh.position.set(o.x, o.y, o.z);
-    // The same two nested rotations the real car uses, so the ghost sits where the
-    // car would rather than ninety degrees off it.
+    // The same nested rotations the real car uses, so the ghost sits where the
+    // car would rather than ninety degrees off it — including the static rake,
+    // though not the recorded lap's live pitch/roll.
     const root = new THREE.Object3D();
+    const attitude = new THREE.Object3D();
+    attitude.rotation.x = chassisAttitudeRotation(0, 0).x;
     const visual = new THREE.Object3D();
     visual.rotation.y = DEG90;
     const body = new THREE.Object3D();
@@ -623,7 +632,8 @@ export class Car {
     body.position.x = MESH_FORWARD_OFFSET;
     body.add(mesh);
     visual.add(body);
-    root.add(visual);
+    attitude.add(visual);
+    root.add(attitude);
     root.visible = false;
     root.renderOrder = 2;
     return root;
@@ -705,13 +715,15 @@ export class Car {
      * frame while the car moved at 0.064. That is the "bouncing front to rear like
      * a cobblestone road" — a smooth car, drawn badly.
      *
-     * The axis mapping lives in chassisAttitudeRotation: visualRoot's Euler is
-     * gimbal-locked by its constant 90° yaw, so x and z both rotate about the
-     * lateral axis (positive = nose up) and roll cannot be drawn on this node.
+     * The axis mapping lives in chassisAttitudeRotation; it lands on the
+     * yaw-free attitude node, whose axes are the root frame's — x pitches
+     * about the lateral axis, z rolls about the fore-aft axis. The pivot is
+     * the root origin, which is exactly the suspension model's own reference:
+     * corner heights are `zc + ax·pitch + ay·roll` about chassisY.
      */
     const att = chassisAttitudeRotation(sim.pitch, sim.roll);
-    this.visualRoot.rotation.x = att.x;
-    this.visualRoot.rotation.z = att.z;
+    this.attitude.rotation.x = att.x;
+    this.attitude.rotation.z = att.z;
 
     const susp = v.car.suspension;
     const wheels = [this.lfw, this.rfw, this.lrw, this.rrw];

@@ -75,22 +75,32 @@ test('suspensionHubOffset tracks corner compression', () => {
 });
 
 test('chassisAttitudeRotation includes static rake at rest', () => {
-  // The visualRoot Euler collapses to one rotation about the lateral axis
-  // (rotation.y is pinned at 90°), and a POSITIVE angle there raises the nose —
-  // verified against three.js directly. Nose-down rake is therefore negative,
-  // matching the physics pitch convention unchanged.
+  // The attitude node sits between root and visualRoot with no yaw, so its
+  // axes are the root frame's: +X is the lateral (pitch) axis, positive =
+  // nose-up; +Z is the fore-aft (roll) axis, positive lifts the right side.
+  // Nose-down rake is therefore a negative x, matching the physics pitch
+  // convention unchanged.
   const att = chassisAttitudeRotation(0, 0);
-  assert.ok(Math.abs(att.x) < 1e-9, 'x must stay zero — it adds to pitch, not roll');
-  assert.ok(att.z < 0, 'nose-down rake is a negative Z rotation on visualRoot');
-  assert.ok(Math.abs(att.z - staticRakePitch()) < 1e-9);
+  assert.ok(att.x < 0, 'nose-down rake is a negative X rotation on the attitude node');
+  assert.ok(Math.abs(att.x - staticRakePitch()) < 1e-9);
+  assert.ok(Math.abs(att.z) < 1e-9, 'no roll at rest');
 });
 
 test('braking dive renders nose-down', () => {
   // Physics pitch is nose-up positive, so braking pitch is negative, and the
   // rendered angle must go more negative (nose drops) — not less.
-  const rest = chassisAttitudeRotation(0, 0).z;
-  const braking = chassisAttitudeRotation(-0.02, 0).z;
+  const rest = chassisAttitudeRotation(0, 0).x;
+  const braking = chassisAttitudeRotation(-0.02, 0).x;
   assert.ok(braking < rest, 'braking must lower the nose below the static rake');
+});
+
+test('body roll renders right-side-down for positive physics roll', () => {
+  // Physics roll is positive with the right side down (suspension corner arms:
+  // CORNER_AY is +TRACK_HALF on the left corners). A positive Z rotation in
+  // the root frame lifts the right side, so the render negates it.
+  const att = chassisAttitudeRotation(0, 0.05);
+  assert.ok(Math.abs(att.z + 0.05) < 1e-9, 'roll passes through negated');
+  assert.ok(Math.abs(att.x - staticRakePitch()) < 1e-9, 'roll must not leak into pitch');
 });
 
 test('authored mesh hubs land on the physics axles once the body is shifted', () => {

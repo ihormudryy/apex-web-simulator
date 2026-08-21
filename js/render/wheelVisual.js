@@ -67,21 +67,21 @@ export function staticRakePitch() {
 }
 
 /**
- * visualRoot attitude. Static rake is added to the sim pitch.
+ * Attitude-node rotation. Static rake is added to the sim pitch.
  *
- * visualRoot's Euler keeps rotation.y pinned at 90°, which puts the x and z
- * components in gimbal lock: Rx(x)·Ry(90°)·Rz(z) = Rx(x + z)·Ry(90°), a single
- * rotation about the world lateral axis — pitch. A POSITIVE angle raises the
- * nose (verified against three.js with the real root → visualRoot → body
- * chain), so the physics pitch (nose-up positive) passes through unnegated.
- * The old `-(pitch + rake)` drew the car nose-UP at rest with the diffuser
- * pressed into the track, and rendered braking dive as nose lift.
+ * The attitude node sits between `root` and `visualRoot` and carries NO yaw,
+ * so its axes are the root frame's: -Z forward, +X right, +Y up. Pitch is a
+ * rotation about +X (positive = nose-up, so the physics pitch passes through
+ * unnegated); roll is a rotation about +Z, where positive lifts the right
+ * side — the physics roll is right-side-down positive, so it is negated.
  *
- * Roll cannot be represented on this node at all — anything written to x just
- * adds to pitch — so x stays 0 until the attitude gets its own yaw-free node.
+ * It used to live on visualRoot itself, whose Euler keeps rotation.y pinned
+ * at 90°. That gimbal-locks x and z into a single lateral-axis rotation:
+ * Rx(x)·Ry(90°)·Rz(z) = Rx(x + z)·Ry(90°) — both components rendered as
+ * pitch, and roll could not be drawn at all.
  */
 export function chassisAttitudeRotation(pitch, roll) {
-  return { x: 0, z: pitch + staticRakePitch() };
+  return { x: pitch + staticRakePitch(), z: -roll };
 }
 
 /**
