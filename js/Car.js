@@ -20,7 +20,7 @@ import {
 import { enableCarParticleSystems } from './render/carParticleBackend.js';
 import {
   hubBaseY, chassisAttitudeRotation, wheelRootPosition, suspensionHubOffset,
-  MESH_FORWARD_OFFSET, AUTHORED_TRACK_HALF,
+  MESH_FORWARD_OFFSET, AUTHORED_TRACK_HALF, WHEEL_MESH_YAW,
 } from './render/wheelVisual.js';
 import { WHEEL_Y } from './physics/surface.js';
 
@@ -393,14 +393,10 @@ export class Car {
       });
     }
 
-    // Wheels are root children, where the car's lateral axis is ±X — and the
-    // wheel meshes are authored with the axle already along X (+X face
-    // inboard). Left wheels use the geometry as authored; right wheels flip
-    // 180° so the rim's outer face points outboard. The old ∓90° came from
-    // the 2011 demo, whose car frame had +X forward — copied into this frame
-    // it pointed every axle fore-aft and stood the tyres perpendicular.
-    const rotLeft  = new THREE.Matrix4();
-    const rotRight = new THREE.Matrix4().makeRotationY(Math.PI);
+    // Left wheels as authored, right wheels flipped outboard — the why lives
+    // with WHEEL_MESH_YAW in wheelVisual.js.
+    const rotLeft  = new THREE.Matrix4().makeRotationY(WHEEL_MESH_YAW[0]);
+    const rotRight = new THREE.Matrix4().makeRotationY(WHEEL_MESH_YAW[1]);
 
     for (const [name, mat] of Object.entries(wheelParts)) {
       BinLoader.load(`obj/js/${name}.bin`, geo => {

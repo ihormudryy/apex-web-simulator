@@ -17,6 +17,18 @@ import {
 export const IS_FRONT = [true, true, false, false];
 
 /**
+ * Yaw applied to each corner's wheel geometry, rad.
+ *
+ * The meshes are authored with the axle along X and the +X face inboard, and
+ * the wheels are root children where the lateral axis IS ±X — so left wheels
+ * use the geometry as authored and right wheels flip 180° to face their rim
+ * outboard. Only 0 and π keep the axle lateral: the 2011 demo's ∓90° values
+ * belonged to its +X-forward car frame, and copying them here pointed every
+ * axle fore-aft and stood the tyres perpendicular to the car.
+ */
+export const WHEEL_MESH_YAW = [0, Math.PI, 0, Math.PI];
+
+/**
  * Distance from the ground contact to the wheel object origin, m.
  * The authored Tyre.bin geometry has radius exactly 0.334 — the same as the
  * physics radius — so anything larger floats the tyres above the deck.
