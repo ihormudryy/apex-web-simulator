@@ -472,7 +472,17 @@ export class Car {
     shadow.renderOrder = 1;
     shadow.castShadow = false;
     shadow.receiveShadow = false;
+    this._contactShadow = shadow;
     this.root.add(shadow);
+  }
+
+  /**
+   * The baked blob and the real-time sun shadow both darken the patch under
+   * the car; with MultiplyBlending they stack into a double-dark rectangle.
+   * The caller hides the blob whenever cascaded shadows are on.
+   */
+  setContactShadowEnabled(on) {
+    if (this._contactShadow) this._contactShadow.visible = on;
   }
 
   /**
