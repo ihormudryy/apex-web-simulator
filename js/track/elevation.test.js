@@ -66,10 +66,10 @@ test('no single metre of track steps more than a real gradient', () => {
 });
 
 test('the gradient is signed and matches the profile', () => {
-  // Abbey down to Village is a descent.
-  assert.ok(elevationGradient(0.06, LAP) < 0, 'the drop into Village must be a drop');
-  // Aintree up to Wellington is a climb.
-  assert.ok(elevationGradient(0.28, LAP) > 0, 'the climb to Wellington must be a climb');
+  // Lap fractions follow the surveyed centerline: Farm→Village (~0.08–0.13)
+  // is a descent, The Loop→Wellington (~0.16–0.24) a climb.
+  assert.ok(elevationGradient(0.10, LAP) < 0, 'the drop into Village must be a drop');
+  assert.ok(elevationGradient(0.21, LAP) > 0, 'the climb to Wellington must be a climb');
 });
 
 // ---------------------------------------------------------------------------
@@ -89,8 +89,9 @@ test('the drainage crown falls away from the centreline on both sides', () => {
 });
 
 test('banking tilts the road, so the two edges are not symmetric', () => {
-  // Luffield is the most banked corner on the lap.
-  const t = 0.44;
+  // Luffield is the most banked corner on the lap — t 0.325 on the surveyed
+  // centerline.
+  const t = 0.325;
   assert.ok(Math.abs(bankingAt(t)) > 0.005, 'Luffield must actually be banked');
   const left = crossSlopeHeight(t, 5);
   const right = crossSlopeHeight(t, -5);

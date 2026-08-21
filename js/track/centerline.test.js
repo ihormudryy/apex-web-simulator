@@ -97,11 +97,15 @@ test('Silverstone corner radii are bounded, not the zero-radius kinks of a polyg
   const c = buildCenterline(SILVERSTONE_WAYPOINTS, 4000);
   const tightest = minCurvatureRadius(c);
   // A polygon vertex is a zero-radius corner and no car can take one at any
-  // speed. The Loop is the slowest corner on the real circuit at ~85 km/h.
-  assert.ok(tightest > 25, `tightest corner radius is ${tightest.toFixed(1)} m`);
+  // speed. With the surveyed geometry the bound is on the CENTERLINE, which
+  // at The Loop is genuinely ~20 m — drivers carry ~95 km/h through it only
+  // by straightening the corner across the full 14 m width, which is a
+  // driving-line matter. The old 25 m bound dated from the hand-tuned layout
+  // where the centerline doubled as the driving line.
+  assert.ok(tightest > 18, `tightest corner radius is ${tightest.toFixed(1)} m`);
   const slowest = Math.sqrt(1.6 * 9.81 * tightest) * 3.6;
-  assert.ok(slowest > 70 && slowest < 130,
-    `slowest corner allows ${slowest.toFixed(0)} km/h — not a Silverstone-like hairpin`);
+  assert.ok(slowest > 55 && slowest < 130,
+    `slowest corner allows ${slowest.toFixed(0)} km/h on the centerline — not a Silverstone-like hairpin`);
 });
 
 test('the heading never jumps between stations', () => {

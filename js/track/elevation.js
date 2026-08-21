@@ -39,23 +39,28 @@ const TAU = Math.PI * 2;
  * gradient and its rate of change, not the absolute number.
  */
 export const SILVERSTONE_ELEVATION = [
-  { t: 0.00, y: 10.64 },   // Abbey — the high point
-  { t: 0.06, y: 6.48 },   // Farm Curve, dropping
-  { t: 0.13, y: 0.02 },   // Village, at the bottom
-  { t: 0.18, y: 1.64 },   // The Loop
-  { t: 0.24, y: 5.10 },   // Aintree, climbing
-  { t: 0.33, y: 8.79 },   // Wellington Straight
-  { t: 0.39, y: 6.95 },   // Brooklands, dropping in
-  { t: 0.44, y: 5.79 },   // Luffield
-  { t: 0.50, y: 8.56 },   // Woodcote, rising
-  { t: 0.57, y: 12.02 },   // Copse — high
-  { t: 0.64, y: 9.25 },   // Maggotts
-  { t: 0.69, y: 4.18 },   // Becketts, falling through
-  { t: 0.74, y: 2.33 },   // Chapel
-  { t: 0.83, y: 3.72 },   // Hangar Straight
-  { t: 0.89, y: 6.25 },   // Stowe
-  { t: 0.94, y: 3.25 },   // Vale, the dip
-  { t: 0.97, y: 6.72 },   // Club, climbing back
+  // Lap fractions follow the surveyed centerline (silverstoneSurvey.js): the
+  // corners sit at their measured stations — Village/Loop at 763/906 m,
+  // Hangar Straight the 830 m gap after Chapel, Vale's chicane at ~5.4 km.
+  // The interpolators assume the first anchor sits at t = 0 exactly.
+  { t: 0.000, y: 9.30 },   // the grid, climbing toward Abbey
+  { t: 0.042, y: 10.64 },   // Abbey — the high point
+  { t: 0.076, y: 6.48 },   // Farm Curve, dropping
+  { t: 0.130, y: 0.02 },   // Village, at the bottom
+  { t: 0.154, y: 1.64 },   // The Loop
+  { t: 0.185, y: 5.10 },   // Aintree, climbing
+  { t: 0.240, y: 8.79 },   // Wellington Straight
+  { t: 0.298, y: 6.95 },   // Brooklands, dropping in
+  { t: 0.325, y: 5.79 },   // Luffield
+  { t: 0.358, y: 8.56 },   // Woodcote, rising
+  { t: 0.390, y: 12.02 },   // Copse — high
+  { t: 0.500, y: 9.25 },   // Maggotts
+  { t: 0.600, y: 4.18 },   // Becketts, falling through
+  { t: 0.685, y: 2.33 },   // Chapel
+  { t: 0.760, y: 3.72 },   // Hangar Straight
+  { t: 0.826, y: 6.25 },   // Stowe
+  { t: 0.915, y: 3.25 },   // Vale, the dip
+  { t: 0.957, y: 6.72 },   // Club, climbing back
 ];
 
 /**
@@ -144,14 +149,14 @@ export const CROWN_SLOPE = 0.015;
  * 5 g.
  */
 export const SILVERSTONE_BANKING = [
-  { t: 0.00, a: 0.000 },
-  { t: 0.13, a: -0.012 },   // Village, slightly adverse
-  { t: 0.24, a: 0.010 },    // Aintree, mild positive
-  { t: 0.44, a: 0.018 },    // Luffield, the most banked corner on the lap
-  { t: 0.57, a: 0.008 },    // Copse
-  { t: 0.69, a: -0.006 },   // Becketts, a touch adverse
-  { t: 0.89, a: 0.014 },    // Stowe
-  { t: 0.97, a: 0.004 },
+  { t: 0.000, a: 0.000 },
+  { t: 0.130, a: -0.012 },   // Village, slightly adverse
+  { t: 0.185, a: 0.010 },    // Aintree, mild positive
+  { t: 0.325, a: 0.018 },    // Luffield, the most banked corner on the lap
+  { t: 0.390, a: 0.008 },    // Copse
+  { t: 0.600, a: -0.006 },   // Becketts, a touch adverse
+  { t: 0.826, a: 0.014 },    // Stowe
+  { t: 0.960, a: 0.004 },
 ];
 
 export function bankingAt(t, points = SILVERSTONE_BANKING) {
@@ -222,15 +227,15 @@ const BUMP_HARMONICS = [
  * entry is not.
  */
 export const SILVERSTONE_ROUGHNESS = [
-  { t: 0.00, r: 0.45 },
-  { t: 0.13, r: 0.85 },   // Village — the roughest part of the lap
-  { t: 0.24, r: 0.55 },
-  { t: 0.33, r: 0.25 },   // Wellington Straight, resurfaced and smooth
-  { t: 0.44, r: 0.60 },
-  { t: 0.57, r: 0.40 },   // Copse
-  { t: 0.69, r: 0.70 },   // Becketts, notably bumpy on entry
-  { t: 0.83, r: 0.20 },   // Hangar Straight
-  { t: 0.94, r: 0.75 },   // Vale
+  { t: 0.000, r: 0.45 },
+  { t: 0.130, r: 0.85 },   // Village — the roughest part of the lap
+  { t: 0.200, r: 0.55 },
+  { t: 0.250, r: 0.25 },   // Wellington Straight, resurfaced and smooth
+  { t: 0.325, r: 0.60 },   // Luffield
+  { t: 0.390, r: 0.40 },   // Copse
+  { t: 0.600, r: 0.70 },   // Becketts, notably bumpy on entry
+  { t: 0.760, r: 0.20 },   // Hangar Straight
+  { t: 0.915, r: 0.75 },   // Vale
 ];
 
 export function roughnessAt(t, points = SILVERSTONE_ROUGHNESS) {

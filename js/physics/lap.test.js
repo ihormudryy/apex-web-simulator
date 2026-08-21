@@ -86,7 +86,7 @@ const noInput = () =>
  * roughly 1.8 g it starts running wide at Abbey — as it should, since it is then
  * asking for more grip than exists.
  */
-function makeDriver({ latG = 1.4, topSpeed = 45, brakeG = 3.0 } = {}) {
+function makeDriver({ latG = 1.4, topSpeed = 45, brakeG = 1.8 } = {}) {
   return function drive(car, input, track) {
     const { samples, spacing } = track.centerline;
     const n = samples.length;
@@ -94,7 +94,12 @@ function makeDriver({ latG = 1.4, topSpeed = 45, brakeG = 3.0 } = {}) {
     const v = Math.max(forwardSpeed(car), 1);
     const step = Math.max(1, Math.round(6 / spacing));
 
-    // Slowest speed any curvature between here and a braking distance ahead allows.
+    // Slowest speed any curvature between here and a braking distance ahead
+    // allows. `brakeG` is the PLANNING deceleration, deliberately well under
+    // what the car can pull in a straight line: braking continues into the
+    // corner entry where the friction circle is already spending grip on
+    // turning, and planning at the car's peak 3 g meant arriving at the
+    // surveyed Village/Loop hairpins 80 km/h too fast, every lap.
     let target = topSpeed;
     const horizon = Math.round((30 + v * v / (2 * brakeG * 9.81)) / spacing);
     for (let d = 0; d < horizon; d += step) {
@@ -297,8 +302,11 @@ test('the flat and elevated circuits give lap times within a few percent', () =>
   // Elevation, bumps and a drainage crown should cost a little time, not change
   // the car into something else. A big divergence means the surface is fighting
   // the suspension rather than being driven over.
-  const flat = runLaps(150, {});
-  const bumpy = runLaps(150, { elevated: true });
+  // 200 s: a lap is ~131 s flat out, and the planner's early braking for the
+  // surveyed hairpins puts a cautious lap in the 150s — 150 s of sim time
+  // stopped covering a full lap.
+  const flat = runLaps(200, {});
+  const bumpy = runLaps(200, { elevated: true });
   assert.ok(flat.laps >= 1 && bumpy.laps >= 1, 'both must complete a lap');
   const a = Math.min(...flat.lapTimes);
   const b = Math.min(...bumpy.lapTimes);
