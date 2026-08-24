@@ -1,0 +1,9 @@
+# Branded legacy livery — do not publish (real sponsor marks).
+obj/textures/BodyPaint.legacy.jpg
+
+# User-downloaded car shells (place locally; see obj/cars/README.md).
+obj/cars/*.glb
+obj/cars/*.gltf
+obj/cars/*.bin
+obj/cars/*/
+!obj/cars/README.md
