@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { CAMERA_MODES, DRIVER_CAMERA, nextCameraMode, clampChaseZoom, adjustChaseZoom, CHASE_ZOOM } from './cameraModes.js';
 
 test('C cycles rear chase → driver → front bumper → rear', () => {
-  assert.deepEqual(CAMERA_MODES, ['chase', 'driver', 'front']);
+  assert.deepEqual(CAMERA_MODES, ['chase', 'driver', 'front', 'finish']);
   assert.equal(nextCameraMode('chase'), 'driver');
   assert.equal(nextCameraMode('driver'), 'front');
-  assert.equal(nextCameraMode('front'), 'chase');
+  assert.equal(nextCameraMode('front'), 'finish');
+  assert.equal(nextCameraMode('finish'), 'chase');
 });
 
 // Steering hub after the car's two +90° Y wraps and the body's forward shift:

@@ -1,4 +1,4 @@
-export const CAMERA_MODES = ['chase', 'driver', 'front'];
+export const CAMERA_MODES = ['chase', 'driver', 'front', 'finish'];
 
 /** Chase and bumper cameras. Tight near keeps ribbon depth from fighting. */
 export const CAMERA_NEAR = 0.25;
@@ -8,6 +8,21 @@ export const CHASE_ZOOM = {
   min: 2,
   max: 30,
   step: 0.6,
+};
+
+/**
+ * Broadcast-style finish gantry camera: elevated outside the wall, looking
+ * across the start/finish toward oncoming traffic.
+ */
+export const FINISH_CAMERA = {
+  // Metres past the wall along the outward normal.
+  outward: 18,
+  height: 6.5,
+  // Look target along the track from the finish line, metres (negative = before).
+  lookAlong: -28,
+  lookHeight: 0.6,
+  fov: 48,
+  near: CAMERA_NEAR,
 };
 
 /** @param {number} radius */

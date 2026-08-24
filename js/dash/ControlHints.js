@@ -30,6 +30,11 @@ const HINTS_CSS = `
   color: #e9eff8;
   text-transform: uppercase;
 }
+.hints__rec {
+  margin-top: 6px;
+  color: #ff6b6b;
+  letter-spacing: 0.12em;
+}
 @media (prefers-reduced-motion: reduce) {
   .hints { transition: none; }
 }
@@ -55,7 +60,9 @@ function el(tag, className, text) {
 
 const HINT_ROWS = [
   ['WASD', 'drive'],
-  ['C', 'camera'],
+  ['Space', 'tap log · hold brake'],
+  ['C', 'camera (finish)'],
+  ['Q', 'quality (auto)'],
   ['+ / −', 'rear zoom'],
   ['H', 'hide HUD'],
   ['Esc', 'reset'],
@@ -77,6 +84,16 @@ export class ControlHints {
     }
 
     container.appendChild(this.root);
+
+    this._recRow = el('div', 'hints__row hints__rec');
+    this._recRow.style.display = 'none';
+    this._recRow.append(el('span', 'hints__key', 'REC'), document.createTextNode('logging'));
+    this.root.append(this._recRow);
+  }
+
+  /** @param {boolean} active */
+  setRecording(active) {
+    if (this._recRow) this._recRow.style.display = active ? 'flex' : 'none';
   }
 
   toggle() {

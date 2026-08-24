@@ -2,17 +2,21 @@ import * as THREE from 'three';
 import Stats from 'three/addons/libs/stats.module.js';
 import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { Car } from './Car.js';
-import { createSilverstone } from './track/Silverstone.js';
+import { createDefaultCircuit, DEFAULT_CIRCUIT_NAME } from './track/defaultCircuit.js';
+import { GltfDropZone } from './mod/gltfDrop.js';
+import { CarPicker } from './dash/CarPicker.js';
+import { DEFAULT_CAR_ID, readStoredCarId } from './mod/carCatalog.js';
+import { loadCarGlb } from './mod/loadCarGlb.js';
 import { RenderPanel } from './render/RenderPanel.js';
-import { defaultRenderValues } from './render/renderPanelState.js';
+import { defaultRenderValues, DEFAULT_RENDER_SCALE } from './render/renderPanelState.js';
 import {
   BLOOM_INPUT_CLAMP, CINEMATIC_DEFAULTS, CINEMATIC_SLIDERS, WEBGL_BLOOM_SCALE,
-  focusDistanceFor,
+  cinematicFeatures, focusDistanceFor, motionBlurStrengthForSpeed,
 } from './render/cinematicState.js';
 import {
   applyCinematicValues, setCinematicFocus,
 } from './render/cinematicPost.js';
-import { nextCameraMode, DRIVER_CAMERA, CAMERA_NEAR, adjustChaseZoom, CHASE_ZOOM } from './cameraModes.js';
+import { nextCameraMode, DRIVER_CAMERA, CAMERA_NEAR, adjustChaseZoom, CHASE_ZOOM, FINISH_CAMERA } from './cameraModes.js';
 import {
   createChassisCamera, updateChassisCamera, speedFov,
 } from './render/chassisCamera.js';
@@ -20,14 +24,23 @@ import { Dashboard } from './dash/Dashboard.js';
 import { ControlHints } from './dash/ControlHints.js';
 import { createTelemetry } from './dash/telemetry.js';
 import { SetupPanel } from './dash/setupPanel.js';
+import { PhysicsModePanel, ensureTopRightStack } from './dash/PhysicsModePanel.js';
+import {
+  readStoredPhysicsMode, resolvePhysicsMode, writeStoredPhysicsMode,
+} from './physics/physicsMode.js';
+import { defaultSetup } from './physics/setup.js';
 import {
   createGhostState, recordGhostStep, completeLap, advanceGhost, ghostTime,
 } from './physics/ghost.js';
 import {
+  createTelemetryRecorder, downloadLogCSV, logLength,
+} from './physics/telemetryLog.js';
+import {
   directionFromEquirectUV, sunDirectionFromEquirect, horizonColorFromEquirect,
 } from './render/equirect.js';
 import { outdoorSkyData, DEFAULT_SUN_U, DEFAULT_SUN_V } from './render/outdoorSky.js';
-import { createRendererBackend, setRendererPreferenceAndReload, wantsWebGpuRenderer } from './render/rendererBackend.js';
+import { createRendererBackend, setRendererPreferenceAndReload, wantsWebGpuRenderer, applyRenderScale } from './render/rendererBackend.js';
+import { prepareCarEffectsBackend } from './render/carEffects.js';
 import {
   followDirectionalSun,
   HEMISPHERE_INTENSITY,
@@ -37,6 +50,10 @@ import {
   SUN_INTENSITY,
   SHADOW_INTENSITY,
 } from './render/lightingBalance.js';
+import { OVERCAST_LIGHTING, qualityPreset, nextQualityPreset } from './render/renderQuality.js';
+import {
+  createQualityScaler, stepQualityScaler, setQualityManual, qualityCaption,
+} from './render/qualityScaler.js';
 import { EngineAudio } from './audio/EngineAudio.js';
 import {
   setPose, resetVehicle, createVehicle, replayStep, renderPose, telemetryOf,
@@ -74,12 +91,10 @@ const SKYBOX_HEIGHT = 1.6;
 const SKYBOX_RADIUS = 2200;
 // `GroundedSkybox` flattens its lower hemisphere into a disc at `position.y -
 // height`. That disc is opaque terrain-height geometry, so it has to sit below
-// every real surface or it submerges them: with both values at 1.6 the disc
-// landed at exactly y=0, above the runoff lawn (-0.04) and the infield (-0.25),
-// and painted the HDRI's poorly-sampled bottom pole over the entire verge. Only
-// the parts of the grass tufts above y=0 showed through, like reeds in a lake.
-// The real ground reaches 1610 m and fog saturates at 1400 m, so the disc is
-// never needed as ground — it only has to stay out of the way.
+// every real surface or it submerges them. The circuit's surfaces sit at the
+// elevation profile (around y = 0 on the grid, ± a few metres of hill), and
+// the real ground reaches 1610 m with fog at 1400 m, so the disc is never needed
+// as ground — it only has to stay out of the way.
 const SKYBOX_GROUND_Y = -0.35;
 const SKYBOX_Y = SKYBOX_HEIGHT + SKYBOX_GROUND_Y;
 
@@ -107,12 +122,21 @@ class HelloRacer {
     this._lookOffset = new THREE.Vector3();
     this._followYaw = 0;
     this._camRoll = 0;
+    this._camAv = 0;
     this._chaseReady = false;
+    this._telemetryRecorder = createTelemetryRecorder();
+    this._renderScale = DEFAULT_RENDER_SCALE;
+    /** Tap Space toggles the log; hold (~180 ms) engages brake without logging a false pedal. */
+    this._spaceBrakePending = false;
+    this._spaceBrakeTimer = null;
     this._baseFov = 35;
     this._dragButton = -1;
     this._lastMouse = { x: 0, y: 0 };
 
     this._viewMode = 'chase';
+    this._qualityId = 'ultra';
+    this._qualityScaler = createQualityScaler({ preset: this._qualityId });
+    this._atmosphere = 'overcast';
 
     this._forward = new THREE.Vector3();
     this._right = new THREE.Vector3();
@@ -135,65 +159,34 @@ class HelloRacer {
     this._csmMaterialScanFrames = 120;
     this._bounceLight = null;
     this._rimLight = null;
-    this._sunIntensity = SUN_INTENSITY;
-    this._shadowIntensity = SHADOW_INTENSITY;
-    this._toneExposure = TONE_EXPOSURE;
-    this._envIntensity = ENVIRONMENT_INTENSITY;
+    this._sunIntensity = OVERCAST_LIGHTING.sunIntensity;
+    this._shadowIntensity = OVERCAST_LIGHTING.shadowIntensity;
+    this._envIntensity = OVERCAST_LIGHTING.envIntensity;
+    this._toneExposure = OVERCAST_LIGHTING.toneExposure;
     this.renderPanel = null;
+    this.physicsModePanel = null;
+    this.physicsMode = resolvePhysicsMode(
+      typeof location !== 'undefined' ? location.search : '',
+      readStoredPhysicsMode(),
+    );
     this._headCam = createChassisCamera();
     this.setup = null;
     this.setupPanel = null;
     this.ghost = null;
     this.ghostCar = null;
     this._ghostMesh = null;
+    this._ghostWasVisible = false;
     this._lastLapCount = 0;
     this.engineAudio = new EngineAudio();
     this._fx = {
       csm: true,
       // GTAO (replaces SSAO): depth+normal AO in linear HDR before OutputPass.
-      // Toggle with `1`. Default off — on WebGPU the full TSL stack is ~2× scene
-      // cost (pre-pass + lit pass + GTAO + SSGI + TRAA); WebGL uses GTAOPass.
+      // Default off — on WebGPU the full TSL stack is ~2× scene cost (pre-pass +
+      // lit pass + GTAO + SSGI + TRAA); WebGL uses GTAOPass. Toggle in Render panel.
       ssao: false,
       bounce: true,
-      /**
-       * Temporal AA. **Default off, because it measured worse.** Toggle with `T`.
-       *
-       * The case for it is strong on paper and the plan calls it the largest
-       * image-quality win available: this scene is almost entirely thin geometry —
-       * kerb stripes, 0.14 m dashes, barrier rails, catch-fence wire, wing
-       * elements, 34 000 grass cutouts — and MSAA resolves edge coverage without
-       * touching a dash two hundred metres away that is a third of a pixel wide.
-       *
-       * And by the rendering dashboard's metrics it worked spectacularly:
-       * sub-pixel instability 3.80 -> 1.60, worst-case edge crawl 46 -> 19,
-       * unresolved detail 9.1% -> 2.4%. Every target green, including the two the
-       * plan recorded as stuck.
-       *
-       * All of which was mostly blur. Instability measures how much the frame
-       * changes when the sampling grid moves half a pixel, and a blurred frame
-       * barely changes either — so the metric rewards blur and cannot tell the two
-       * apart. Measured against a 3x supersampled reference, which can be gamed by
-       * neither, it is 143% further from the truth than MSAA alone
-       * (`npm run validate:aa`).
-       *
-       * The pass itself is structurally right — reprojection verified working at
-       * 1.9 px of displacement while moving and 0.06 px parked — and the
-       * accumulation is stable. What it does not do is converge: a jittered frame
-       * starts ~0.35 px from the truth and the history recovers almost none of
-       * that back. Finishing it needs Catmull-Rom history sampling and probably a
-       * variance-based clip instead of min/max, and that is a bounded piece of
-       * work rather than a mystery. It is left off until it earns its place.
-       */
-      taa: false,
-      /**
-       * The grading curve, last in the chain. Toggle with `G`.
-       *
-       * It has a measured job rather than a look: with everything else green the
-       * rendering dashboard reports 5.0% of pixels at or below 5/255 against a 2%
-       * target, which is a twentieth of the frame carrying no information at all.
-       * Lifting the toe of the curve fixes that and leaves the midtones, the mean
-       * luminance and the saturation where they already measured correctly.
-       */
+      /** MSAA + light temporal + sharpen. Toggle with `T`. */
+      taa: true,
       grade: true,
       /**
        * Cinematic post: velocity-driven motion blur, bloom, lens flare, DoF.
@@ -240,7 +233,10 @@ class HelloRacer {
     this._setupLights();
 
     try {
-      const backend = await createRendererBackend(THREE, { antialias: true });
+      const backend = await createRendererBackend(THREE, {
+        antialias: true,
+        renderScale: this._renderScale,
+      });
       this.renderer = backend.renderer;
       this._rendererBackend = backend.backend;
       this._useCsm = backend.useCsm;
@@ -293,23 +289,34 @@ class HelloRacer {
     let surfaceNodes = null;
     if (this._rendererBackend === 'webgpu') {
       surfaceNodes = await import('./render/tslSurfaceNodes.js');
+      await prepareCarEffectsBackend('webgpu');
     }
     // The ground has to reach past the fog, or its edge shows on the horizon.
-    this.track = createSilverstone({ groundMargin: FOG_FAR * 1.15, surfaceNodes });
+    this.track = createDefaultCircuit({ groundMargin: FOG_FAR * 1.15, surfaceNodes });
     this.scene.add(this.track);
+    this._modScenery = new THREE.Group();
+    this._modScenery.name = 'userScenery';
+    this.scene.add(this._modScenery);
 
     this._loadEnvironment();
 
-    this.car = new Car(this.scene, { backend: this._rendererBackend });
+    this.car = new Car(this.scene, {
+      backend: this._rendererBackend,
+      physicsMode: this.physicsMode,
+    });
     // Materials that explicitly receive `envMap` need it wired in; otherwise
     // dielectrics go unnaturally dark (no ambient IBL).
     this.car.loadAssets(this._envMap);
     this._placeCarOnTrack();
-    this._mountRenderPanel(container);
+    const topRight = ensureTopRightStack(container);
+    this._mountRenderPanel(topRight);
+    this._mountPhysicsModePanel(topRight);
+    this._mountCarPicker(topRight);
 
     this.telemetry = createTelemetry({ lapLength: this.track.centerline.length });
-    this.dashboard = new Dashboard(container, this.track, { circuitName: 'Silverstone' });
+    this.dashboard = new Dashboard(container, this.track, { circuitName: DEFAULT_CIRCUIT_NAME });
     this.controlHints = new ControlHints(container);
+    this._mountModLoader(container);
 
     // Setup screen. Applying one rebuilds the car, because half of a setup lives in
     // derived state — roll stiffness, corner loads, the suspension's own rates —
@@ -321,10 +328,12 @@ class HelloRacer {
     // Ghost lap. The recorder is attached to the player's vehicle so inputs are
     // captured on the sim clock, which is the only clock a replay can trust.
     this.ghost = createGhostState();
-    this.ghostCar = createVehicle({});
+    this.ghostCar = createVehicle({ physicsMode: this.physicsMode });
     this.car.vehicle.recorder = this.ghost.current;
+    this._syncTelemetryObserver();
     this._setupResetControl(container);
 
+    this._applyQualityPreset(this._qualityId);
     this._lastTime = performance.now();
     this._animate();
   }
@@ -428,6 +437,25 @@ class HelloRacer {
   }
 
   /**
+   * User-supplied glTF / glb — car body or scenery. IP is the uploader's problem.
+   */
+  _mountModLoader(container) {
+    new GltfDropZone(container, {
+      // A dropped file is an unknown quantity: assume it brings its own wheels
+      // only if the fitter can actually find them, which `loadExternalModel`
+      // decides for itself.
+      onCar: root => this.car?.loadExternalModel(root),
+      onTrack: root => {
+        while (this._modScenery.children.length) {
+          this._modScenery.remove(this._modScenery.children[0]);
+        }
+        this._modScenery.add(root);
+      },
+      onError: () => {},
+    });
+  }
+
+  /**
    * Foldable lighting / FX overlay. Reflectivity used to live in MaterialPanel;
    * everything scene-relevant sits here so keys and sliders share one state.
    */
@@ -446,6 +474,7 @@ class HelloRacer {
         ?? defaultRenderValues(backend).rimIntensity,
       reflectivity: this.car?.bodyPaintMat?.reflectivity ?? 0.45,
       aoBlend: this._aoPass?.blendIntensity ?? 0.45,
+      renderScale: this._renderScale,
     };
     this.renderPanel = new RenderPanel(container, {
       backend,
@@ -457,11 +486,93 @@ class HelloRacer {
     });
   }
 
+  _mountCarPicker(container) {
+    this.carPicker = new CarPicker(container, {
+      initial: readStoredCarId(),
+      onChange: (id, entry) => this._applyCatalogCar(id, entry),
+    });
+    // Restore last pick after the default body has started loading.
+    const stored = readStoredCarId();
+    if (stored !== DEFAULT_CAR_ID) {
+      queueMicrotask(() => this.carPicker.apply(stored).catch(() => {}));
+    }
+  }
+
+  /**
+   * Swap the visual body from the car catalog. `default` restores the bundled mesh.
+   * @param {string} id
+   * @param {import('./mod/carCatalog.js').CarCatalogEntry} entry
+   */
+  async _applyCatalogCar(id, entry) {
+    if (!this.car) return;
+    if (!entry.url) {
+      this.car.clearExternalModel();
+      return;
+    }
+    const root = await loadCarGlb(entry.url);
+    this.car.loadExternalModel(root, { hasOwnWheels: entry.hasOwnWheels === true });
+  }
+
+  _mountPhysicsModePanel(container) {
+    this.physicsModePanel = new PhysicsModePanel(container, {
+      initial: this.physicsMode,
+      onChange: mode => this._applyPhysicsMode(mode),
+    });
+  }
+
+  _applyPhysicsMode(mode) {
+    this.physicsMode = mode;
+    writeStoredPhysicsMode(mode);
+    const setup = this.setup ?? defaultSetup();
+    this.car.rebuild(setup, { physicsMode: mode });
+    this.car.vehicle.recorder = this.ghost.current;
+    this.ghostCar = createVehicle({ physicsMode: mode });
+    this._placeCarOnTrack();
+    this._syncTelemetryObserver();
+    this.telemetry.reset?.();
+    resetGhostState(this.ghost);
+  }
+
+  /** Sample the physics log on the sim clock while recording is active. */
+  _syncTelemetryObserver() {
+    const rec = this._telemetryRecorder;
+    const track = this.track;
+    this.car.vehicle.observer = rec.active
+      ? v => { rec.observe(v, track); }
+      : null;
+  }
+
+  /**
+   * Space toggles CSV telemetry capture. Brake still uses the same key on hold;
+   * a short tap only toggles the recorder so the CSV does not get a spurious
+   * brake sample on the keydown that starts or stops logging.
+   */
+  _toggleTelemetryRecord() {
+    const rec = this._telemetryRecorder;
+    const nowRecording = rec.toggle();
+    this._syncTelemetryObserver();
+    this.controlHints?.setRecording(nowRecording);
+    if (nowRecording) return;
+
+    const samples = logLength(rec.log);
+    if (samples > 0) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      downloadLogCSV(rec.log, `telemetry-${stamp}.csv`);
+    }
+  }
+
   _onRenderPanelChange(key, value) {
     switch (key) {
       case 'toneExposure':
         this._toneExposure = value;
         if (this.renderer) this.renderer.toneMappingExposure = value;
+        break;
+      case 'renderScale':
+        this._renderScale = value;
+        if (this.renderer) {
+          applyRenderScale(this.renderer, value);
+          this._onResize();
+        }
         break;
       case 'envIntensity':
         this._envIntensity = value;
@@ -490,6 +601,9 @@ class HelloRacer {
       case 'aoBlend':
         if (this._aoPass && this._aoPass.blendIntensity !== undefined) {
           this._aoPass.blendIntensity = value;
+        }
+        if (this._webgpuPost?.aoPass?.scale) {
+          this._webgpuPost.aoPass.scale.value = value * 2.2;
         }
         break;
       case 'ssao':
@@ -531,6 +645,11 @@ class HelloRacer {
     if (this._rendererBackend === 'webgl' && this._csm?.lights) {
       for (const light of this._csm.lights) {
         light.intensity = this._sunIntensity;
+        // The cascade lights are where WebGL's shadows come from, so this is
+        // what the CSM toggle has to reach. `_setFxCsm` can only see
+        // `_sunLight`, which is null on this backend — so before this line the
+        // toggle moved and nothing happened at all.
+        light.castShadow = this._fx.csm;
         if (light.shadow) light.shadow.intensity = this._shadowIntensity;
       }
       if (this._csm.lightIntensity !== undefined) {
@@ -538,8 +657,18 @@ class HelloRacer {
       }
     }
     if (this._sunLight) {
-      this._sunLight.intensity = this._fx.csm ? this._sunIntensity : 0;
-      this._sunLight.shadow.intensity = this._shadowIntensity;
+      // Key-light intensity has nothing to do with the shadow cascade. This
+      // read `this._fx.csm ? this._sunIntensity : 0`, so switching shadows off
+      // switched the sun off with them and the frame went *darker* — measured
+      // 13/255 darker, where removing shadows can only ever brighten.
+      this._sunLight.intensity = this._sunIntensity;
+      // And the shadow is gated by its own intensity rather than by
+      // `castShadow`, because clearing `castShadow` on a light that carries a
+      // `CSMShadowNode` does not retire the cascade — the lookup goes stale and
+      // reads as fully shadowed, which measured *darker* again (under-car road
+      // 15.7 -> 9.5). Zeroing the intensity is the one knob that resolves at
+      // runtime without rebuilding every material that samples the cascade.
+      this._sunLight.shadow.intensity = this._fx.csm ? this._shadowIntensity : 0;
     }
   }
 
@@ -558,7 +687,9 @@ class HelloRacer {
 
   _setFxCsm(on) {
     this._fx.csm = Boolean(on);
-    if (this._sunLight) this._sunLight.castShadow = this._fx.csm;
+    // `castShadow` is deliberately left alone on the WebGPU sun — see
+    // `_applySunAndShadow`, which gates the cascade by shadow intensity and
+    // carries the flag to the WebGL cascade lights, a different set of lights.
     this._applySunAndShadow();
     this.renderPanel?.syncFx({ csm: this._fx.csm });
   }
@@ -566,6 +697,7 @@ class HelloRacer {
   _setFxTaa(on) {
     this._fx.taa = Boolean(on);
     if (this._taaPass) this._taaPass.enabled = this._fx.taa;
+    if (this._sharpenPass) this._sharpenPass.enabled = this._fx.taa;
     if (!this._fx.taa && this.camera) this.camera.clearViewOffset();
     this.renderPanel?.syncFx({ taa: this._fx.taa });
   }
@@ -573,7 +705,61 @@ class HelloRacer {
   _setFxGrade(on) {
     this._fx.grade = Boolean(on);
     if (this._gradingPass) this._gradingPass.enabled = this._fx.grade;
+    // WebGPU has no grading *pass*: the curve is a node at the end of the
+    // cinematic tail, so switching it changes the graph and needs a rebuild.
+    // Without this the checkbox moved and nothing happened on the default
+    // backend — measured 8.76% of the frame crushed at or below 5/255 either
+    // way, against the 2% this curve exists to deliver.
+    this._syncCinematicFeatures();
     this.renderPanel?.syncFx({ grade: this._fx.grade });
+  }
+
+  /** Cycle Ultra → High → Balanced. Hotkey `Q`. Pauses auto for a few seconds. */
+  _cycleQuality() {
+    this._qualityId = nextQualityPreset(this._qualityId || 'ultra');
+    setQualityManual(this._qualityScaler, this._qualityId);
+    this._applyQualityPreset(this._qualityId);
+  }
+
+  _applyQualityPreset(id) {
+    const q = qualityPreset(id);
+    this._qualityId = id;
+    this._renderScale = q.renderScale;
+    if (this.renderer) {
+      applyRenderScale(this.renderer, q.renderScale);
+      this._onResize();
+    }
+    this._setFxCsm(q.csm);
+    this._setFxTaa(q.taa);
+    this._setFxGrade(q.grade);
+    this._fx.ssao = q.ssao;
+    this._fx.bounce = q.bounce;
+    this._fx.motionBlur = q.motionBlur;
+    this._fx.bloom = q.bloom;
+    this._fx.flare = q.flare;
+    this._fx.motionBlurStrength = q.motionBlurStrength;
+    if (this._aoPass) this._aoPass.blendIntensity = q.aoBlend;
+    this.track?.setGrassDensity(q.grassDensity);
+    this.car?.setSmokeBudget(q.smokeBudget);
+    this._syncCinematicFeatures();
+    this.renderPanel?.syncFx({
+      ssao: this._fx.ssao,
+      bounce: this._fx.bounce,
+      csm: this._fx.csm,
+      taa: this._fx.taa,
+      grade: this._fx.grade,
+      motionBlur: this._fx.motionBlur,
+      bloom: this._fx.bloom,
+      flare: this._fx.flare,
+    });
+    this.renderPanel?.setMeterExtra(qualityCaption(this._qualityScaler));
+  }
+
+  _tickQualityScaler(frameMs) {
+    if (!this._qualityScaler) return;
+    const step = stepQualityScaler(this._qualityScaler, frameMs);
+    if (step.changed) this._applyQualityPreset(step.preset);
+    else this.renderPanel?.setMeterExtra(qualityCaption(this._qualityScaler));
   }
 
   /**
@@ -587,19 +773,21 @@ class HelloRacer {
     this._sunDir.set(sun.x, sun.y, sun.z);
 
     const backend = wantsWebGpuRenderer() ? 'webgpu' : 'webgl';
+    const hemi = OVERCAST_LIGHTING.hemiIntensity[backend] ?? OVERCAST_LIGHTING.hemiIntensity.webgl;
+    const rimI = OVERCAST_LIGHTING.rimIntensity[backend] ?? OVERCAST_LIGHTING.rimIntensity.webgl;
 
-    const rim = new THREE.DirectionalLight(0xbcd8ff, RIM_INTENSITY[backend]);
+    const rim = new THREE.DirectionalLight(0xbcd8ff, rimI);
     rim.position.set(-35, 30, -55);
     this.scene.add(rim);
     this._rimLight = rim;
 
     // Fill into CSM shadows. AmbientLight was removed — it is flat and stacked
     // badly with hemisphere + IBL. The sun + env map own direct lighting now.
-    // WebGPU fill sits lower so CSMShadowNode casts stay visible.
+    // Overcast preset: higher fill, softer sun — matches the reference still.
     this._bounceLight = new THREE.HemisphereLight(
       new THREE.Color(SKY_COLOR),
       new THREE.Color(0x5a5348),
-      HEMISPHERE_INTENSITY[backend],
+      hemi,
     );
     this.scene.add(this._bounceLight);
   }
@@ -613,6 +801,7 @@ class HelloRacer {
     const { UnrealBloomPass } = await import('three/addons/postprocessing/UnrealBloomPass.js');
     const { Pass, FullScreenQuad } = await import('three/addons/postprocessing/Pass.js');
     const { createTaaPass } = await import('./render/taaPass.js');
+    const { createSharpenPass } = await import('./render/sharpenPass.js');
     const { createGradingPass } = await import('./render/gradingPass.js');
 
     this._csm = new CSM({
@@ -656,6 +845,12 @@ class HelloRacer {
     this._composer.setSize(window.innerWidth, window.innerHeight);
     this._composer.addPass(new RenderPass(this.scene, this.camera));
 
+    const { createDepthHarvestPass } = await import('./render/depthHarvest.js');
+    this._depthHarvest = createDepthHarvestPass(THREE, Pass, FullScreenQuad, {
+      width: size.x, height: size.y,
+    });
+    this._composer.addPass(this._depthHarvest);
+
     this._aoPass = new GTAOPass(this.scene, this.camera, size.x, size.y);
     this._aoPass.output = GTAOPass.OUTPUT.Default;
     this._aoPass.blendIntensity = 0.45;
@@ -679,6 +874,12 @@ class HelloRacer {
     });
     this._taaPass.enabled = this._fx.taa;
     this._composer.addPass(this._taaPass);
+
+    this._sharpenPass = createSharpenPass(Pass, FullScreenQuad, {
+      width: size.x, height: size.y,
+    });
+    this._sharpenPass.enabled = this._fx.taa;
+    this._composer.addPass(this._sharpenPass);
 
     /**
      * Bloom, ahead of `OutputPass` so it thresholds **linear HDR** rather than
@@ -757,12 +958,13 @@ class HelloRacer {
     this._applySunAndShadow();
 
     const post = createWebGpuPost(THREE, this.renderer, this.scene, this.camera, {
-      // `_fx` carries the toggles, CINEMATIC_DEFAULTS the slider values.
       values: { ...CINEMATIC_DEFAULTS, ...this._fx },
+      hybridAa: this._fx.taa !== false,
+      sharpenAmount: 0.28,
     });
     this._webgpuPost = post;
     this._aoPass = post.aoPass;
-    // Full post stack is expensive — only wired when GTAO is toggled on (`1`).
+    // Full post stack is expensive — only wired when GTAO is toggled on in Render panel.
     this._renderPipeline = null;
     if (typeof post.setAoEnabled === 'function') {
       post.setAoEnabled(this._fx.ssao);
@@ -784,9 +986,23 @@ class HelloRacer {
   /** Is any effect that needs the cinematic node graph switched on? */
   _wantsCinematicPass() {
     if (this._rendererBackend !== 'webgpu' || !this._webgpuPost) return false;
-    // `flare` is generated from the bloom texture, so it cannot pull the pass
-    // in on its own — see `cinematicFeatures`.
-    return this._fx.motionBlur || this._fx.bloom || this._fx.dof;
+    const f = this._effectiveCinematicFeatures();
+    return f.motionBlur || f.bloom || f.dof || f.grade || this._fx.taa;
+  }
+
+  /** DoF follows the ghost car during replay comparison, off while driving. */
+  _effectiveCinematicFeatures() {
+    const ghostReplay = Boolean(
+      this._ghostMesh?.visible && this.ghost?.active && this.ghost?.best != null,
+    );
+    return cinematicFeatures({
+      ...this._fx,
+      dof: this._fx.dof || ghostReplay,
+    });
+  }
+
+  _syncCinematicFeatures() {
+    this._webgpuPost?.setCinematicFeatures(this._effectiveCinematicFeatures());
   }
 
   /**
@@ -799,11 +1015,20 @@ class HelloRacer {
    */
   _updateCinematicFocus() {
     const uniforms = this._webgpuPost?.cinematicUniforms;
-    if (!uniforms || !this._fx.dof || !this.car || !this.camera) return;
-    setCinematicFocus(
-      uniforms,
-      focusDistanceFor(this.camera.position, this.car.root.position),
-    );
+    const f = this._effectiveCinematicFeatures();
+    if (uniforms && f.dof && this.car && this.camera) {
+      setCinematicFocus(
+        uniforms,
+        focusDistanceFor(this.camera.position, this.car.root.position),
+      );
+    }
+    if (uniforms && f.motionBlur && this.car) {
+      const base = this.renderPanel?.values?.motionBlurStrength
+        ?? CINEMATIC_DEFAULTS.motionBlurStrength;
+      applyCinematicValues(uniforms, {
+        motionBlurStrength: motionBlurStrengthForSpeed(this.car.speed(), base),
+      });
+    }
   }
 
   /**
@@ -813,7 +1038,7 @@ class HelloRacer {
    */
   _setCinematicFlag(key, on) {
     this._fx[key] = Boolean(on);
-    this._webgpuPost?.setCinematicFeatures(this._fx);
+    this._syncCinematicFeatures();
     if (key === 'bloom' && this._bloomPass) this._bloomPass.enabled = this._fx.bloom;
     this.renderPanel?.syncFx({ [key]: this._fx[key] });
   }
@@ -899,6 +1124,7 @@ class HelloRacer {
   }
 
   _clearCarForGridReset() {
+    this._cancelSpaceBrakeArm();
     const i = this.car.input;
     i.forward = false;
     i.reverse = false;
@@ -945,6 +1171,12 @@ class HelloRacer {
     this._followYaw = this.car.root.rotation.y;
     this._lookSmoothed.copy(this.car.root.position);
     this._camRoll = 0;
+    this._camAv = 0;
+    if (this._telemetryRecorder?.active) {
+      this._telemetryRecorder.stop();
+      this._syncTelemetryObserver();
+      this.controlHints?.setRecording(false);
+    }
   }
 
   _setupResetControl(container) {
@@ -978,8 +1210,10 @@ class HelloRacer {
     // Clamped once, here. A backgrounded tab or a long asset stall hands over a
     // multi-second delta; unclamped that slams the steering to full lock and
     // teleports the camera, since both integrate against dt directly.
-    const dt = Math.min((now - this._lastTime) * 0.001, MAX_FRAME_DT);
+    const rawMs = now - this._lastTime;
+    const dt = Math.min(rawMs * 0.001, MAX_FRAME_DT);
     this._lastTime = now;
+    this._tickQualityScaler(rawMs);
 
     this._checkLaunch();
     this.car.updateSteering(dt);
@@ -1001,7 +1235,7 @@ class HelloRacer {
 
     // The baked blob is the car shadow only while the real-time one is off —
     // both at once multiply into a double-dark patch under the chassis.
-    this.car.setContactShadowEnabled(!this._fx.csm);
+    this.car.setContactShadowEnabled(this._fx.csm);
 
     if (this._csm && this._rendererBackend === 'webgl') {
       // Car meshes arrive asynchronously (BinLoader). Scan for a short window
@@ -1034,9 +1268,13 @@ class HelloRacer {
       // Anchor the sun on the camera so CSM cascades cover the car, not the
       // world origin kilometres away from Silverstone.
       followDirectionalSun(this._sunLight, this._sunDir, this.camera.position);
-      this._sunLight.castShadow = this._fx.csm;
-      this._sunLight.intensity = this._fx.csm ? this._sunIntensity : 0;
-      this._sunLight.shadow.intensity = this._shadowIntensity;
+      // Only the sun's *direction* is a per-frame concern. Intensity and shadow
+      // strength belong to `_applySunAndShadow`, and re-deriving them here beat
+      // it to the punch every frame: the sliders appeared to work because they
+      // route through the same fields, but the CSM toggle's own fix was undone
+      // 120 times a second, which is why zeroing `shadow.intensity` measured as
+      // having no effect whatsoever.
+      this._applySunAndShadow();
       if (this._webgpuCsm?.camera) this._webgpuCsm.updateFrustums();
     }
     this.track.updateTracksideLOD(this.camera);
@@ -1048,6 +1286,14 @@ class HelloRacer {
     this._applyJitter();
 
     this._updateCinematicFocus();
+
+    if (this._rendererBackend === 'webgl' && this._depthHarvest) {
+      this.car?.bindParticleDepth({
+        depthTexture: this._depthHarvest.texture,
+        resolution: this.renderer.getDrawingBufferSize(this._drawSize ??= new THREE.Vector2()),
+        camera: this.camera,
+      });
+    }
 
     if (this._fx.ssao && this._webgpuPost?.renderPipeline) {
       this._setWebGpuAoEnabled(true);
@@ -1094,7 +1340,7 @@ class HelloRacer {
    */
   _applySetup(setup) {
     this.setup = setup;
-    this.car.rebuild(setup);
+    this.car.rebuild(setup, { physicsMode: this.physicsMode });
     this.car.vehicle.recorder = this.ghost.current;
     this._placeCarOnTrack();
     this.telemetry.reset?.();
@@ -1131,11 +1377,15 @@ class HelloRacer {
     const steps = advanceGhost(this.ghost, dt,
       input => replayStep(this.ghostCar, input, this.track));
     if (this._ghostMesh) {
-      this._ghostMesh.visible = this.ghost.active && steps >= 0 && this.ghost.best !== null;
-      if (this._ghostMesh.visible) {
+      const visible = this.ghost.active && steps >= 0 && this.ghost.best !== null;
+      if (visible !== this._ghostWasVisible) {
+        this._ghostWasVisible = visible;
+        this._syncCinematicFeatures();
+      }
+      this._ghostMesh.visible = visible;
+      if (visible) {
         const pose = renderPose(this.ghostCar, this._ghostPose ??= { x: 0, z: 0, yaw: 0 });
-        const sim = telemetryOf(this.ghostCar);
-        this._ghostMesh.position.set(pose.x, sim.chassisY, pose.z);
+        this._ghostMesh.position.set(pose.x, pose.chassisY, pose.z);
         this._ghostMesh.rotation.y = pose.yaw;
       }
     }
@@ -1221,6 +1471,39 @@ class HelloRacer {
     this._setCameraLens(speedFov(fov, car.speed()), near);
     this._camRoll = 0;
     this._chaseReady = false;
+    this._camAv = 0;
+  }
+
+  /** Broadcast finish-line camera — elevated outside the wall at start/finish. */
+  _updateFinishCamera() {
+    const c = FINISH_CAMERA;
+    const idx = this.track?._spawnIndex?.() ?? 0;
+    const sample = this.track?.samples?.[idx];
+    const car = this.car;
+    if (!sample || !car) {
+      this._updateOnboardCamera(2.99, 0.42, 22, 0.32, 52, CAMERA_NEAR, 0);
+      return;
+    }
+    const side = 1;
+    const wall = sample.halfWidth + sample.runoff + c.outward;
+    const camX = sample.x + sample.nx * side * wall;
+    const camZ = sample.z + sample.nz * side * wall;
+    const scratch = this._finishCamScratch ?? (this._finishCamScratch = {
+      surface: 'tarmac', mu: 1, height: 0, roughness: 0, curvature: 0, nx: 0, nz: 0,
+    });
+    if (this.track.queryWheel) this.track.queryWheel(camX, camZ, scratch);
+    const groundY = scratch.height || car.root.position.y;
+    this.camera.position.set(camX, groundY + c.height, camZ);
+    const pos = car.root.position;
+    this._camTarget.set(
+      sample.x * 0.25 + pos.x * 0.75 + sample.tx * c.lookAlong * 0.15,
+      groundY * 0.25 + (pos.y + 0.55) * 0.75,
+      sample.z * 0.25 + pos.z * 0.75 + sample.tz * c.lookAlong * 0.15,
+    );
+    this.camera.lookAt(this._camTarget);
+    this._setCameraLens(c.fov, c.near);
+    this._camRoll = 0;
+    this._chaseReady = false;
   }
 
   _updateCamera(dt) {
@@ -1234,6 +1517,10 @@ class HelloRacer {
       // Just ahead of the nose tip, which sits 2.95 m forward of the pose now
       // that the body carries MESH_FORWARD_OFFSET.
       this._updateOnboardCamera(2.99, 0.42, 22, 0.32, 52, CAMERA_NEAR, dt);
+      return;
+    }
+    if (this._viewMode === 'finish') {
+      this._updateFinishCamera();
       return;
     }
 
@@ -1308,8 +1595,12 @@ class HelloRacer {
     this.camera.position.copy(pos).add(this._camOffset);
     this._lookSmoothed.copy(pos).add(this._lookOffset);
 
-    const targetRoll = THREE.MathUtils.clamp(-car.steerAngle * 0.28 - car.av * 0.06, -0.12, 0.12);
-    this._camRoll = this._expLerp(this._camRoll, this._dragButton === -1 ? targetRoll : 0, 0.05, dt);
+    // Yaw rate moves at tyre frequency; the boom should not roll at that rate.
+    const pose = renderPose(car.vehicle, this._chasePose ??= {});
+    this._camAv = this._expLerp(this._camAv, pose.av, 0.10, dt);
+    const targetRoll = THREE.MathUtils.clamp(
+      -car.steerAngle * 0.22 - this._camAv * 0.032, -0.10, 0.10);
+    this._camRoll = this._expLerp(this._camRoll, this._dragButton === -1 ? targetRoll : 0, 0.04, dt);
 
     this.camera.lookAt(this._lookSmoothed);
     this.camera.rotateZ(this._camRoll);
@@ -1322,13 +1613,14 @@ class HelloRacer {
   _onResize() {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
+    applyRenderScale(this.renderer, this._renderScale);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     if (this._composer) this._composer.setSize(window.innerWidth, window.innerHeight);
-    if (this._taaPass) {
-      const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
-      this._taaPass.setSize(size.x, size.y);
-    }
-    if (this._webgpuCsm) this._webgpuCsm.updateFrustums();
+    const size = this.renderer.getDrawingBufferSize(this._drawSize ??= new THREE.Vector2());
+    this._taaPass?.setSize(size.x, size.y);
+    this._sharpenPass?.setSize(size.x, size.y);
+    this._depthHarvest?.setSize(size.x, size.y);
+    if (this._webgpuCsm?.camera) this._webgpuCsm.updateFrustums();
   }
 
   _setDriveInput(e, down) {
@@ -1350,12 +1642,28 @@ class HelloRacer {
       case 'KeyD':
         i.right = down;
         break;
-      case 'Space':
-        i.brake = down;
-        e.preventDefault();
-        break;
       default:
         break;
+    }
+  }
+
+  /** ~180 ms — long enough to distinguish a log toggle tap from a brake hold. */
+  static SPACE_BRAKE_HOLD_MS = 180;
+
+  _armSpaceBrake() {
+    this._cancelSpaceBrakeArm();
+    this._spaceBrakePending = true;
+    this._spaceBrakeTimer = setTimeout(() => {
+      this._spaceBrakeTimer = null;
+      if (this._spaceBrakePending) this.car.input.brake = true;
+    }, HelloRacer.SPACE_BRAKE_HOLD_MS);
+  }
+
+  _cancelSpaceBrakeArm() {
+    this._spaceBrakePending = false;
+    if (this._spaceBrakeTimer != null) {
+      clearTimeout(this._spaceBrakeTimer);
+      this._spaceBrakeTimer = null;
     }
   }
 
@@ -1378,36 +1686,17 @@ class HelloRacer {
       if (!e.repeat) this._setFxTaa(!this._fx.taa);
       return;
     }
-    if (e.code === 'Digit1') {
-      if (!e.repeat) this._setFxSsao(!this._fx.ssao);
-      return;
-    }
-    if (e.code === 'Digit2') {
-      if (this._bounceLight && !e.repeat) this._setFxBounce(!this._fx.bounce);
-      return;
-    }
-    if (e.code === 'Digit3') {
-      if (!e.repeat) this._setFxCsm(!this._fx.csm);
-      return;
-    }
-    if (e.code === 'Digit4') {
-      if (!e.repeat) this._setFxMotionBlur(!this._fx.motionBlur);
-      return;
-    }
-    if (e.code === 'Digit5') {
-      if (!e.repeat) this._setFxBloom(!this._fx.bloom);
-      return;
-    }
-    if (e.code === 'Digit6') {
-      if (!e.repeat) this._setFxDof(!this._fx.dof);
-      return;
-    }
     if (e.code === 'KeyC') {
       if (e.repeat) return;
       this._viewMode = nextCameraMode(this._viewMode);
       this._yaw = 0;
       this._panOffset.set(0, 0, 0);
       this._chaseReady = false;
+      this._camAv = 0;
+      return;
+    }
+    if (e.code === 'KeyQ' && !e.repeat) {
+      this._cycleQuality();
       return;
     }
     if (this._viewMode === 'chase' && !e.repeat) {
@@ -1427,10 +1716,27 @@ class HelloRacer {
       e.preventDefault();
       return;
     }
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (!e.repeat) {
+        this._toggleTelemetryRecord();
+        this._armSpaceBrake();
+      } else {
+        this._cancelSpaceBrakeArm();
+        this.car.input.brake = true;
+      }
+      return;
+    }
     this._setDriveInput(e, true);
   }
 
   _onKeyUp(e) {
+    if (e.code === 'Space') {
+      this._cancelSpaceBrakeArm();
+      this.car.input.brake = false;
+      e.preventDefault();
+      return;
+    }
     this._setDriveInput(e, false);
   }
 }
