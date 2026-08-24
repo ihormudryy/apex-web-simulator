@@ -1,7 +1,7 @@
 <!DOCTYPE HTML>
 <html lang="en">
 	<head>
-		<title>F1 WebGL</title>
+		<title>Apex Web Simulator</title>
 		<meta charset="utf-8">
 		<style>
 			body { background: #fff; margin: 0; overflow: hidden; }
@@ -11,13 +11,16 @@
 		<div id="container"></div>
 		<script type="module">
 		// WebGPURenderer must share the same `three` build as every Texture and
-		// Material. The WebGL path keeps three.module.js (CSM/EffectComposer need
-		// ShaderChunk). Default is WebGPU; `?renderer=` overrides localStorage
-		// (`helloracer.renderer`). Import map must be set before modules load.
+		// Material. Default is WebGPU; `?renderer=` overrides localStorage
+		// (`apex-web-simulator.renderer`). Import map must load before modules.
 		const CDN = 'https://cdn.jsdelivr.net/npm/three@0.185.1';
+		const PREF_KEY = 'apex-web-simulator.renderer';
+		const LEGACY_KEY = 'helloracer.renderer';
 		const param = new URLSearchParams(location.search).get('renderer');
 		let stored = null;
-		try { stored = localStorage.getItem('helloracer.renderer'); } catch (_) { /* */ }
+		try {
+			stored = localStorage.getItem(PREF_KEY) ?? localStorage.getItem(LEGACY_KEY);
+		} catch (_) { /* */ }
 		const mode = (param === 'webgpu' || param === 'webgl')
 			? param
 			: (stored === 'webgpu' || stored === 'webgl') ? stored : 'webgpu';

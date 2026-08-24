@@ -4,6 +4,24 @@ from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 GZIP_TYPES = {'application/javascript', 'text/html', 'text/css', 'application/json'}
 PRE_GZIPPED = {'.bin'}
+GZIP_MAGIC = b'\x1f\x8b'
+
+
+def is_gzipped(path):
+    """Does this file actually start with the gzip magic number?
+
+    The extension alone is not enough. The bundled car meshes under `obj/js/`
+    are gzip streams named `.bin`, so they must be served with
+    `Content-Encoding: gzip` — but a glTF's buffer is also called `scene.bin`
+    and is raw. Announcing gzip for that one made the browser try to inflate
+    plain binary and fail the whole model with ERR_CONTENT_DECODING_FAILED,
+    which is what stopped the external car shells from loading at all.
+    """
+    try:
+        with open(path, 'rb') as f:
+            return f.read(2) == GZIP_MAGIC
+    except OSError:
+        return False
 
 
 class GzipHandler(SimpleHTTPRequestHandler):
@@ -13,7 +31,7 @@ class GzipHandler(SimpleHTTPRequestHandler):
         path = self.translate_path(self.path)
         ext  = os.path.splitext(path)[1].lower()
 
-        if ext in PRE_GZIPPED:
+        if ext in PRE_GZIPPED and is_gzipped(path):
             try:
                 f = open(path, 'rb')
             except OSError:
