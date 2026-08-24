@@ -45,6 +45,13 @@ export function outdoorSkyData({
         r = 0.50 * (1 - t) + 0.12 * t;
         g = 0.66 * (1 - t) + 0.24 * t;
         b = 0.92 * (1 - t) + 0.68 * t;
+        // Low-frequency cloud streaks — cheap volumetric feel without a pass.
+        const cloud = 0.5 + 0.5 * Math.sin(u * 28 + Math.sin(v * 9) * 2.1);
+        const cloud2 = 0.5 + 0.5 * Math.sin(u * 17 - v * 11 + 1.4);
+        const haze = Math.max(0, cloud * cloud2 - 0.55) * (1 - t * 0.35);
+        r += 0.11 * haze;
+        g += 0.12 * haze;
+        b += 0.14 * haze;
       }
 
       const du = Math.min(Math.abs(u - sunU), 1 - Math.abs(u - sunU));

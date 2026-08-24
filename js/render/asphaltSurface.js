@@ -4,9 +4,10 @@
  * `asphaltMaps.js` supplies aggregate the size of a 4 m tile. That is the right
  * scale for stones and wrong for everything that makes a circuit look used —
  * the rubbered-in racing line, dusty marbles off it, resurfacing patches, the
- * seam where paving passes meet. Those span metres to hundreds of metres and
- * never repeat, so they live in one map indexed by position on the track:
- * U is distance around the lap, V is across the racing surface.
+ * seam where paving passes meet, braking zones into corners, and oil stains.
+ * Those span metres to hundreds of metres and never repeat, so they live in
+ * one map indexed by position on the track: U is distance around the lap, V is
+ * across the racing surface.
  *
  * Pure numbers, no Three.js — the profile is unit-tested here and the shader
  * only samples and multiplies, so there is no formula duplicated in GLSL.
@@ -16,14 +17,12 @@
  */
 
 /** Decoded multiplier ranges. The GLSL is generated from these, so they agree. */
-// Floor is set by rubber and the paving seam coinciding: 0.66 x 0.95 x 0.792.
-// Encode ranges must cover what the profile can actually produce or the darkest
-// asphalt on the circuit silently clamps to a single value.
-export const ALBEDO_MUL_MIN = 0.48;
-// Ceiling is set by marbles over a light resurfacing patch: 1.15 x 1.05.
-export const ALBEDO_MUL_MAX = 1.24;
-export const ROUGH_MUL_MIN = 0.70;
-export const ROUGH_MUL_MAX = 1.18;
+// Floor covers stacked rubber + braking + oil. Encode ranges must cover what
+// the profile can actually produce or the darkest asphalt silently clamps.
+export const ALBEDO_MUL_MIN = 0.30;
+export const ALBEDO_MUL_MAX = 1.28;
+export const ROUGH_MUL_MIN = 0.48;
+export const ROUGH_MUL_MAX = 1.20;
 
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp01 = v => Math.max(0, Math.min(1, v));
@@ -42,6 +41,40 @@ const encode = (value, min, max) =>
   Math.round(clamp01((value - min) / (max - min)) * 255);
 
 /**
+ * Sparse oil / coolant blotches. Deterministic from position — not random noise
+ * that would shimmer as the map is resampled.
+ */
+function oilStain(lat, along) {
+  // A few fixed-period blotches around the lap; product of two Gaussians so
+  // each stain is an ellipse a few metres long and half a car wide.
+  const cell = ((along * 0.017) % 1 + 1) % 1;
+  const blotch = Math.exp(-(((cell - 0.42) / 0.035) ** 2))
+    * Math.exp(-(((lat - 0.18) / 0.11) ** 2));
+  const cell2 = ((along * 0.0113) % 1 + 1) % 1;
+  const blotch2 = Math.exp(-(((cell2 - 0.71) / 0.028) ** 2))
+    * Math.exp(-(((lat + 0.32) / 0.09) ** 2));
+  const cell3 = ((along * 0.0067) % 1 + 1) % 1;
+  const blotch3 = Math.exp(-(((cell3 - 0.19) / 0.04) ** 2))
+    * Math.exp(-(((lat - 0.05) / 0.14) ** 2));
+  return clamp01(blotch * 1.4 + blotch2 * 1.1 + blotch3 * 0.9);
+}
+
+/**
+ * Corner-entry braking zones: darker, more polished rubber deposits that recur
+ * along the lap. Without a curvature channel in this pure map, incommensurate
+ * sinusoids stand in for the real braking points — dense enough to read as
+ * zones, sparse enough not to stripe the whole circuit.
+ */
+function brakingZone(lat, along, line) {
+  const gates = Math.pow(0.5 + 0.5 * Math.sin(along * 0.0087 + 0.35), 5)
+    + 0.55 * Math.pow(0.5 + 0.5 * Math.sin(along * 0.0151 + 2.4), 6)
+    + 0.35 * Math.pow(0.5 + 0.5 * Math.sin(along * 0.0043 + 1.1), 4);
+  // Strongest on / near the line; fades toward the marbles.
+  const onLine = line * 0.75 + Math.exp(-((lat / 0.55) ** 2)) * 0.25;
+  return clamp01(gates * onLine);
+}
+
+/**
  * The profile at one point on the surface.
  *
  * @param {number} lat  normalised lateral position, -1 at one edge, +1 at the other
@@ -51,10 +84,11 @@ export function asphaltSurfacePoint(lat, along) {
   // The line does not sit dead centre for a whole lap; it drifts as corners
   // alternate. Two slow incommensurate terms so the drift never visibly repeats.
   const wander = 0.22 * Math.sin(along * 0.0021) + 0.12 * Math.sin(along * 0.0071 + 1.3);
-  const line = Math.exp(-(((lat - wander) / 0.42) ** 2));
+  const line = Math.exp(-(((lat - wander) / 0.32) ** 2));
   // Rubber builds unevenly round the lap — heaviest into and out of corners.
-  const depth = 0.62 + 0.38 * (0.5 + 0.5 * Math.sin(along * 0.0013 + 0.7));
-  const rubber = line * depth;
+  const depth = 0.72 + 0.28 * (0.5 + 0.5 * Math.sin(along * 0.0013 + 0.7));
+  const brake = brakingZone(lat, along, line);
+  const rubber = clamp01(line * depth + brake * 0.45);
 
   // Marbles: dust and rubber pellets swept off the line, lighter and rougher.
   const marbles = smoothstep(0.58, 0.97, Math.abs(lat));
@@ -68,18 +102,31 @@ export function asphaltSurfacePoint(lat, along) {
   // Longitudinal seam where two paving passes meet, about half way out.
   const seam = Math.exp(-(((Math.abs(lat) - 0.5) / 0.035) ** 2));
 
+  // Repair patches: shorter, slightly lighter / newer asphalt rectangles.
+  const repair = Math.pow(0.5 + 0.5 * Math.sin(along * 0.023 + lat * 4.2), 8)
+    * smoothstep(0.15, 0.55, Math.abs(lat));
+
+  const oil = oilStain(lat, along);
+
   let albedo = 1;
-  albedo *= lerp(1, 0.60, rubber);
-  albedo *= lerp(1, 1.15, marbles);
-  albedo *= lerp(0.95, 1.05, patch);
-  albedo *= lerp(1, 0.74, seam * 0.8);
+  albedo *= lerp(1, 0.48, rubber);
+  albedo *= lerp(1, 1.12, marbles);
+  albedo *= lerp(0.95, 1.04, patch);
+  albedo *= lerp(1, 0.78, seam * 0.75);
+  albedo *= lerp(1, 0.85, brake * 0.7);
+  albedo *= lerp(1, 1.06, repair);
+  albedo *= lerp(1, 0.78, oil * 0.85);
 
   let roughness = 1;
-  roughness *= lerp(1, 0.76, rubber);
+  roughness *= lerp(1, 0.70, rubber);
   roughness *= lerp(1, 1.08, marbles);
   roughness *= lerp(0.98, 1.03, patch);
+  // Braking zones polish the aggregate; oil leaves a slick film.
+  roughness *= lerp(1, 0.78, brake * 0.85);
+  roughness *= lerp(1, 0.90, oil);
+  roughness *= lerp(1, 1.04, repair);
 
-  return { albedo, roughness, rubber };
+  return { albedo, roughness, rubber, brake, oil };
 }
 
 /**

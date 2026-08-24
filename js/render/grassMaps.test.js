@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tileableGrassHeight, grassAlbedoFromHeight } from './grassMaps.js';
+import { tileableGrassHeight, grassAlbedoFromHeight, grassFieldTint } from './grassMaps.js';
 import { normalFromHeight, roughnessFromHeight } from './asphaltMaps.js';
 
 test('grass albedo is green, not grey or neon', () => {
@@ -48,4 +48,17 @@ test('grass albedo is a desaturated olive, not crushed to pure green', () => {
   assert.ok(r / g > 0.55, `red too weak: r/g = ${(r / g).toFixed(2)} (mean ${r.toFixed(0)},${g.toFixed(0)},${b.toFixed(0)})`);
   assert.ok(b / g > 0.4, `blue too weak: b/g = ${(b / g).toFixed(2)}`);
   assert.ok(g / r < 2.0, `green runaway: g/r = ${(g / r).toFixed(2)}`);
+});
+
+test('world-space grass tint varies slowly so a tiled lawn does not stamp', () => {
+  const a = grassFieldTint(0, 0);
+  const b = grassFieldTint(12, 9);
+  const c = grassFieldTint(400, -220);
+  assert.ok(a.r > 0.7 && a.g > 0.7 && a.b > 0.7);
+  assert.ok(a.r <= 1.15 && a.g <= 1.15);
+  const near = Math.hypot(a.r - grassFieldTint(4, 3).r, a.g - grassFieldTint(4, 3).g);
+  const far = Math.hypot(a.r - c.r, a.g - c.g);
+  assert.ok(near < 0.08, `tint jumps over 5 m: ${near.toFixed(3)}`);
+  assert.ok(far > near, 'distant lawn should not match the start/finish patch');
+  assert.ok(Math.abs(a.r - b.r) + Math.abs(a.g - b.g) > 0.002);
 });

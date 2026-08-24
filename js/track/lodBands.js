@@ -14,12 +14,43 @@
  * the pieces of a chunked set leaves bald stretches that pop as the camera moves.
  */
 
+/**
+ * Distance bands for trackside detail — the arithmetic only, no Three.js.
+ *
+ * Two things went wrong in the first version of this, and both are decided here.
+ *
+ * The distance must be measured to the *nearest point* of a piece of geometry,
+ * not to its origin or centre. Trackside content is instanced across the whole
+ * lap: `catchFencePanels` is one mesh 5.9 km long whose centre sits a kilometre
+ * from the car while part of it is a metre away. Measuring to the centre — or, as
+ * it happened, to a `THREE.LOD` parked at the world origin — reported ~1011 m for
+ * geometry the driver could touch, and every band collapsed to "too far to draw".
+ *
+ * And detail must fall off by *density*, not by dropping whole objects. Halving
+ * the pieces of a chunked set leaves bald stretches that pop as the camera moves.
+ */
+
 /** Metres: [full detail below, half detail below, nothing beyond]. */
 export const TRACKSIDE_BANDS = {
-  grass: [60, 180, 420],
+  grass: [70, 200, 420],
   fence: [120, 260, 620],
   props: [90, 220, 520],
 };
+
+/**
+ * Slightly tighter grass bands for WebGPU: smoke sprites + CSM already spend
+ * the fill budget, so distant tufts thin sooner while kerb detail stays full.
+ */
+export const TRACKSIDE_BANDS_WEBGPU = {
+  grass: [85, 220, 380],
+  fence: [120, 260, 620],
+  props: [90, 220, 520],
+};
+
+/** @param {'webgl' | 'webgpu'} [backend] */
+export function tracksideBandsFor(backend = 'webgl') {
+  return backend === 'webgpu' ? TRACKSIDE_BANDS_WEBGPU : TRACKSIDE_BANDS;
+}
 
 /**
  * Distance from a point to the nearest surface of a bounding sphere, clamped at
@@ -51,10 +82,13 @@ export function densityForDistance(distance, bands) {
  * Instance count for a mesh at a given distance. Never drops the last instance
  * of something still inside the cut-off, so thin sets do not blink out.
  */
-export function instanceCountFor(fullCount, distance, bands) {
+export function instanceCountFor(fullCount, distance, bands, { nearBoost = 55, densityScale = 1 } = {}) {
+  const scale = Math.max(0, Math.min(1, densityScale));
+  if (scale === 0) return 0;
+  if (distance < nearBoost) return Math.max(1, Math.round(fullCount * scale));
   const density = densityForDistance(distance, bands);
   if (density === 0) return 0;
-  return Math.max(1, Math.round(fullCount * density));
+  return Math.max(1, Math.round(fullCount * density * scale));
 }
 
 /**

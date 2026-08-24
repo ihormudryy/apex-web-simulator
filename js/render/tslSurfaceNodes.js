@@ -23,15 +23,18 @@ import {
 } from 'three/tsl';
 
 /**
- * Asphalt with lap-scale variation: racing line, marbles, patches, seams.
+ * Asphalt with lap-scale variation: racing line, marbles, patches, seams, and
+ * optional session tyre marks (same channels as the WebGL inject).
  *
  * @param {object} params constructor parameters shared with the WebGL material
  * @param {THREE.Texture} surfaceTexture map from `asphaltSurfaceMap`
  * @param {{albedoMin:number, albedoSpan:number, roughMin:number, roughSpan:number}} range
+ * @param {{ tyreMarks?: THREE.Texture | null }} [opts]
  */
-export function createAsphaltNodeMaterial(params, surfaceTexture, range) {
+export function createAsphaltNodeMaterial(params, surfaceTexture, range, opts = {}) {
   const material = new THREE.MeshStandardNodeMaterial(params);
-  const surf = texture(surfaceTexture, attribute('aSurfaceUv', 'vec2'));
+  const surfUv = attribute('aSurfaceUv', 'vec2');
+  const surf = texture(surfaceTexture, surfUv);
 
   // `materialColor` is the material's own albedo — colour times `map`, with the
   // map's colour space already applied — so overriding `colorNode` keeps the
@@ -58,15 +61,45 @@ export function createAsphaltNodeMaterial(params, surfaceTexture, range) {
   const macroDev = dot(macroTexel.rgb, vec3(0.2126, 0.7152, 0.0722))
     .div(float(0.0136)).sub(float(1.0));
   const macroMul = clamp(macroDev.mul(float(3.5)).add(float(1.0)), 0.72, 1.35);
-  material.colorNode = materialColor.mul(albedoMul).mul(rubberTint).mul(macroMul);
+
+  // Dynamic rubber from this session. A 1×1 black placeholder keeps the sampler
+  // valid before the car binds its mark buffer; `uHasTyreMarks` zeros the effect.
+  //
+  // This is `texture( tex )` and not `texture( uniform( tex ) )`. TSL's
+  // `texture()` demands an actual THREE.Texture and throws NodeError on a
+  // UniformNode ("expects a valid instance of THREE.Texture"), which killed the
+  // whole `colorNode` graph — and a MeshStandardNodeMaterial with a dead
+  // colorNode draws pure black, so the entire circuit rendered as a black void
+  // on the WebGPU path while grass, kerbs and barriers looked fine. Rebinding
+  // still works identically: a TextureNode carries `.value` just as a
+  // UniformNode does, which is all `setTyreMarkTexture` assigns to.
+  const emptyMarks = emptyMarkTexture();
+  const uTyreMarks = texture(opts.tyreMarks ?? emptyMarks, surfUv);
+  const uHasTyreMarks = uniform(opts.tyreMarks ? 1 : 0);
+  material.userData.asphaltMarkUniforms = { uTyreMarks, uHasTyreMarks, emptyMarks };
+
+  const marks = uTyreMarks.r.mul(uHasTyreMarks);
+  const markTint = mix(vec3(1.0), vec3(0.28, 0.29, 0.32), marks);
+
+  material.colorNode = materialColor.mul(albedoMul).mul(rubberTint).mul(macroMul).mul(markTint);
 
   // Brighter macro patches are worn, polished asphalt: lighter AND smoother,
   // so the sun response varies with the mottling.
   const macroRough = clamp(float(1.0).sub(macroDev.mul(float(1.8))), 0.85, 1.12);
+  const markRough = mix(float(1.0), float(0.72), marks);
   material.roughnessNode = materialRoughness.mul(
     float(range.roughMin).add(surf.g.mul(float(range.roughSpan))),
-  ).mul(macroRough);
+  ).mul(macroRough).mul(markRough);
   return material;
+}
+
+let _emptyMarkTexture = null;
+function emptyMarkTexture() {
+  if (_emptyMarkTexture) return _emptyMarkTexture;
+  const data = new Uint8Array([0, 0, 0, 255]);
+  _emptyMarkTexture = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
+  _emptyMarkTexture.needsUpdate = true;
+  return _emptyMarkTexture;
 }
 
 /**

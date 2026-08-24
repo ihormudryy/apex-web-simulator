@@ -3,14 +3,14 @@
  * IBL + hemisphere), so its fill sits lower and its sun/shadow punch harder.
  */
 
-export const SUN_INTENSITY = 2.8;
-export const SHADOW_INTENSITY = 0.85;
+export const SUN_INTENSITY = 3.0;
+export const SHADOW_INTENSITY = 0.92;
 export const SUN_DISTANCE = 400;
 
 /** Hemisphere fill — lower on WebGPU so the sun can cast a readable shadow. */
 export const HEMISPHERE_INTENSITY = {
-  webgl: 0.45,
-  webgpu: 0.28,
+  webgl: 0.40,
+  webgpu: 0.18,
 };
 
 export const RIM_INTENSITY = {
@@ -19,7 +19,7 @@ export const RIM_INTENSITY = {
 };
 
 export const ENVIRONMENT_INTENSITY = 0.85;
-export const TONE_EXPOSURE = 1.0;
+export const TONE_EXPOSURE = 0.92;
 
 /**
  * Keep a directional sun anchored on the camera/car so CSM cascades stay useful.

@@ -27,7 +27,7 @@ function hash(n) {
  *
  * @returns {{ data: Uint8Array, size: number }}
  */
-export function tuftClumpTexture({ size = 96, blades = 7, seed = 3 } = {}) {
+export function tuftClumpTexture({ size = 256, blades = 11, seed = 3 } = {}) {
   const data = new Uint8Array(size * size * 4);
   const spec = [];
   for (let b = 0; b < blades; b++) {

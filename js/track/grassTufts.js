@@ -8,7 +8,7 @@ import { interleaveForThinning } from './lodBands.js';
  * Wind, shared by the GLSL and TSL paths so they cannot drift apart.
  * `dir` is a world direction; `amp` is metres of sway at the blade tips.
  */
-export const WIND = { dir: [0.82, 0, 0.57], amp: 0.085 };
+export const WIND = { dir: [0.82, 0, 0.57], amp: 0.11 };
 
 /** Deterministic sway phase from where the tuft stands. */
 export const tuftPhase = (x, z) => x * 0.37 + z * 0.53;
@@ -59,7 +59,7 @@ function tuftMaterialParams() {
   map.minFilter = THREE.LinearMipmapLinearFilter;
   map.magFilter = THREE.LinearFilter;
   map.generateMipmaps = true;
-  map.anisotropy = 8;
+  map.anisotropy = 16;
   map.needsUpdate = true;
 
   return {
@@ -68,7 +68,7 @@ function tuftMaterialParams() {
     // back-to-front transparent queue, where they neither write depth nor sort
     // sanely against each other. Cutout grass belongs in the opaque pass.
     transparent: false,
-    alphaTest: 0.42,
+    alphaTest: 0.38,
     // `alphaToCoverage` was tried here to let MSAA resolve the cutout, on the
     // theory that 34 689 blade-shaped stencils were the worst-case edge crawl.
     // Measured, it made things slightly worse — p99 48.3 -> 52.7 — so the crawl
@@ -155,7 +155,7 @@ function buildMaterial(surfaceNodes) {
  *   now does — 34 000 blades pinned to a single plane float clear of the surface
  *   at the high points of the circuit and are buried at the low ones.
  */
-export function createGrassTufts(centerline, baseY = -0.04, {
+export function createGrassTufts(centerline, baseY = 0, {
   chunks = 96, plan = {}, surfaceNodes = null,
 } = {}) {
   const group = new THREE.Group();
@@ -196,11 +196,15 @@ export function createGrassTufts(centerline, baseY = -0.04, {
     mesh.castShadow = false;
     mesh.receiveShadow = true;
     // The GLSL path owns its own clock; the TSL path uses the renderer's `time`
-    // node, so leave that one alone.
+    // node, so leave that one alone — but still stamp a wall-clock fallback on
+    // the material in case a future TSL build stops auto-advancing `time`.
     if (!uniforms.isTsl) {
       mesh.onBeforeRender = () => {
         uniforms.uTime.value = performance.now() / 1000;
       };
+    } else if (uniforms.uWindDir && uniforms.uWindAmp) {
+      // Keep wind direction/amp live so Render-panel or day-cycle tweaks can land.
+      mesh.userData.windLive = uniforms;
     }
     group.add(mesh);
   }

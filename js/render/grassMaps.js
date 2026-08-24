@@ -27,9 +27,9 @@ function valueNoise(x, y, cells, seed) {
   return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
 }
 
-function fbm(x, y, cells, seed) {
+function fbm(x, y, cells, seed, octaves = 6) {
   let v = 0, amp = 0.5, freq = 1, norm = 0;
-  for (let o = 0; o < 5; o++) {
+  for (let o = 0; o < octaves; o++) {
     v += amp * valueNoise(x * freq, y * freq, cells * freq, seed + o * 19);
     norm += amp;
     amp *= 0.5;
@@ -38,16 +38,19 @@ function fbm(x, y, cells, seed) {
   return v / norm;
 }
 
-export function tileableGrassHeight(size, seed = 9) {
+/** @param {number} [size=1024] */
+export function tileableGrassHeight(size = 1024, seed = 9) {
   const height = new Float32Array(size * size);
-  const cells = 24;
+  // More cells + blade noise so 1k/2k maps resolve individual blades, not blotches.
+  const cells = Math.max(24, Math.round(size / 32));
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const u = (x + 0.5) / size * cells;
       const v = (y + 0.5) / size * cells;
-      const clumps = fbm(u, v, cells, seed);
-      const blades = valueNoise(u * 12, v * 18, cells * 18, seed + 3);
-      height[y * size + x] = clumps * 0.55 + blades * 0.45;
+      const clumps = fbm(u, v, cells, seed, 6);
+      const blades = valueNoise(u * 18, v * 26, cells * 26, seed + 3);
+      const fine = valueNoise(u * 48, v * 52, cells * 52, seed + 7);
+      height[y * size + x] = clumps * 0.48 + blades * 0.36 + fine * 0.16;
     }
   }
   return height;
@@ -73,4 +76,20 @@ export function grassAlbedoFromHeight(height, size) {
     out[o + 3] = 255;
   }
   return out;
+}
+
+/**
+ * Slow world-space albedo multiply for the horizon lawn.
+ * Breaks the tiled 1k grass stamp without a second texture fetch.
+ *
+ * @returns {{r:number,g:number,b:number}}
+ */
+export function grassFieldTint(x, z) {
+  const patches = fbm(x * 0.011, z * 0.011, 64, 41, 4);
+  const streaks = valueNoise(x * 0.0035, z * 0.0035, 32, 73);
+  return {
+    r: 0.88 + streaks * 0.16,
+    g: 0.9 + patches * 0.18,
+    b: 0.86 + patches * 0.12,
+  };
 }

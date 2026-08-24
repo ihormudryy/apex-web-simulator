@@ -90,7 +90,7 @@ export function createCatchFence(centerline, baseY = 0) {
   for (let i = 0; i < panels.length; i++) {
     const p = panels[i];
     const base = typeof baseY === 'function' ? baseY(p.x, p.z) : baseY;
-    dummy.position.set(p.x, base + panelH * 0.5, p.z);
+    dummy.position.set(p.x, base - 0.06 + panelH * 0.5, p.z);
     dummy.lookAt(p.lookX, base + panelH * 0.5, p.lookZ);
     dummy.updateMatrix();
     panelMesh.setMatrixAt(i, dummy.matrix);

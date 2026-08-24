@@ -26,7 +26,7 @@ export const TRACKSIDE_LOD = TRACKSIDE_BANDS;
  *   scales its own instance count. No clones, no duplicated instance matrices,
  *   and frustum culling still works off the full-extent bounding sphere.
  */
-function collectUnits(root, bands, out) {
+function collectUnits(root, bands, out, kind) {
   if (!root) return out;
   root.traverse(object => {
     if (!object.isInstancedMesh || object.count === 0) return;
@@ -39,6 +39,7 @@ function collectUnits(root, bands, out) {
       mesh: object,
       fullCount: object.count,
       bands,
+      kind,
       cx: sphere.center.x,
       cy: sphere.center.y,
       cz: sphere.center.z,
@@ -60,20 +61,23 @@ export function createTracksideLOD({
   for (const part of [grass, fence, props]) if (part) root.add(part);
 
   const units = [];
-  collectUnits(grass, distances.grass, units);
-  collectUnits(fence, distances.fence, units);
-  collectUnits(props, distances.props, units);
+  collectUnits(grass, distances.grass, units, 'grass');
+  collectUnits(fence, distances.fence, units, 'fence');
+  collectUnits(props, distances.props, units, 'props');
 
-  return {
+  const lod = {
     root,
     /** Exposed so a probe can assert what the bands actually decided. */
     units,
+    grassDensity: 1,
     update(camera) {
       const p = camera.position;
       for (const u of units) {
         const d = distanceToSphere(p.x, p.y, p.z, u.cx, u.cy, u.cz, u.radius);
-        u.mesh.count = instanceCountFor(u.fullCount, d, u.bands);
+        const scale = u.kind === 'grass' ? lod.grassDensity : 1;
+        u.mesh.count = instanceCountFor(u.fullCount, d, u.bands, { densityScale: scale });
       }
     },
   };
+  return lod;
 }

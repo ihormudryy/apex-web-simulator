@@ -59,6 +59,69 @@ test('there is a paving seam, local and dark', () => {
   assert.ok(onSeam < beside * 0.92, `seam not visible: ${onSeam.toFixed(3)} vs ${beside.toFixed(3)}`);
 });
 
+test('braking zones darken and polish the racing line', () => {
+  // Sweep the lap for a strong brake gate on the line vs a quiet stretch.
+  let maxBrake = 0;
+  let minBrake = 1;
+  let darkAtBrake = 1;
+  let roughAtBrake = 1;
+  let albedoQuiet = 0;
+  let roughQuiet = 0;
+  let nQuiet = 0;
+  for (let i = 0; i < 600; i++) {
+    const along = (i / 600) * 5900;
+    const p = asphaltSurfacePoint(0, along);
+    if (p.brake > maxBrake) {
+      maxBrake = p.brake;
+      darkAtBrake = p.albedo;
+      roughAtBrake = p.roughness;
+    }
+    if (p.brake < minBrake) minBrake = p.brake;
+    if (p.brake < 0.08) {
+      albedoQuiet += p.albedo;
+      roughQuiet += p.roughness;
+      nQuiet++;
+    }
+  }
+  assert.ok(maxBrake > 0.35, `no braking zone found (max ${maxBrake.toFixed(3)})`);
+  assert.ok(nQuiet > 50, 'need quiet stretches for comparison');
+  albedoQuiet /= nQuiet;
+  roughQuiet /= nQuiet;
+  assert.ok(darkAtBrake < albedoQuiet * 0.92,
+    `brake zone not darker: ${darkAtBrake.toFixed(3)} vs quiet ${albedoQuiet.toFixed(3)}`);
+  assert.ok(roughAtBrake < roughQuiet * 0.95,
+    `brake zone should polish: ${roughAtBrake.toFixed(3)} vs ${roughQuiet.toFixed(3)}`);
+});
+
+test('oil stains are sparse dark slick spots', () => {
+  let maxOil = 0;
+  let oilAlbedo = 1;
+  let oilRough = 1;
+  let cleanAlbedo = 0;
+  let nClean = 0;
+  for (let i = 0; i < 800; i++) {
+    const along = (i / 800) * 5900;
+    for (const lat of [-0.3, 0, 0.2]) {
+      const p = asphaltSurfacePoint(lat, along);
+      if (p.oil > maxOil) {
+        maxOil = p.oil;
+        oilAlbedo = p.albedo;
+        oilRough = p.roughness;
+      }
+      if (p.oil < 0.05 && Math.abs(lat) < 0.4) {
+        cleanAlbedo += p.albedo;
+        nClean++;
+      }
+    }
+  }
+  assert.ok(maxOil > 0.4, `no oil stain found (max ${maxOil.toFixed(3)})`);
+  assert.ok(nClean > 100);
+  cleanAlbedo /= nClean;
+  assert.ok(oilAlbedo < cleanAlbedo * 0.9,
+    `oil should darken: ${oilAlbedo.toFixed(3)} vs ${cleanAlbedo.toFixed(3)}`);
+  assert.ok(oilRough < 0.95, `oil should leave a slick: roughness ${oilRough.toFixed(3)}`);
+});
+
 test('encoded bytes round-trip and use most of the range', () => {
   const { data, width, height } = asphaltSurfaceMap({ width: 256, height: 32, lapLength: 5900 });
   assert.equal(data.length, 256 * 32 * 4);

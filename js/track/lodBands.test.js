@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  TRACKSIDE_BANDS, distanceToSphere, densityForDistance, instanceCountFor,
+  TRACKSIDE_BANDS, TRACKSIDE_BANDS_WEBGPU, tracksideBandsFor,
+  distanceToSphere, densityForDistance, instanceCountFor,
   interleaveForThinning,
 } from './lodBands.js';
 
@@ -51,12 +52,26 @@ test('instance counts scale with density but never blink a live set to nothing',
   assert.equal(instanceCountFor(1, 300, bands), 1);
 });
 
+test('quality densityScale thins nearby grass without blinking a live set', () => {
+  const bands = [60, 180, 420];
+  assert.equal(instanceCountFor(362, 10, bands, { densityScale: 1 }), 362);
+  assert.equal(instanceCountFor(362, 10, bands, { densityScale: 0.55 }), 199);
+  assert.equal(instanceCountFor(362, 500, bands, { densityScale: 0.55 }), 0);
+  assert.equal(instanceCountFor(2, 10, bands, { densityScale: 0.55 }), 1);
+});
+
 test('bands are ordered and sane', () => {
   for (const [name, bands] of Object.entries(TRACKSIDE_BANDS)) {
     const [full, half, cut] = bands;
     assert.ok(full > 0 && full < half && half < cut, `${name}: ${bands}`);
     assert.ok(cut <= 1400, `${name} cut-off ${cut} m is beyond fog.far`);
   }
+});
+
+test('WebGPU grass bands thin earlier than WebGL', () => {
+  assert.equal(tracksideBandsFor('webgl'), TRACKSIDE_BANDS);
+  assert.equal(tracksideBandsFor('webgpu'), TRACKSIDE_BANDS_WEBGPU);
+  assert.ok(TRACKSIDE_BANDS_WEBGPU.grass[2] < TRACKSIDE_BANDS.grass[2]);
 });
 
 test('a thinned prefix still covers the whole chunk', () => {

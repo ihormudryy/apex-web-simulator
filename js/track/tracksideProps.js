@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {
   planMarshalPosts, planDistanceBoards, planTyreStacks,
 } from './tracksidePlacements.js';
+import { distanceBoardTexture } from '../render/distanceBoardTexture.js';
 
 function tyreStackGeometry(tiers) {
   const g = new THREE.BufferGeometry();
@@ -72,27 +73,35 @@ export function createTracksideProps(centerline, baseY = 0) {
   }
 
   if (boards.length) {
-    const boardGeo = new THREE.PlaneGeometry(1.4, 0.72);
-    const boardMat = new THREE.MeshStandardMaterial({
-      color: 0xf4f0e8,
-      roughness: 0.72,
-      metalness: 0,
-      side: THREE.DoubleSide,
-    });
-    const boardMesh = new THREE.InstancedMesh(boardGeo, boardMat, boards.length);
-    boardMesh.name = 'distanceBoards';
-    boardMesh.castShadow = boardMesh.receiveShadow = true;
-
-    const dummy = new THREE.Object3D();
-    for (let i = 0; i < boards.length; i++) {
-      const b = boards[i];
-      dummy.position.set(b.x, (typeof baseY === 'function' ? baseY(b.x, b.z) : baseY) + (1.05), b.z);
-      dummy.lookAt(b.lookX, 1.05, b.lookZ);
-      dummy.updateMatrix();
-      boardMesh.setMatrixAt(i, dummy.matrix);
+    const byLabel = new Map();
+    for (const b of boards) {
+      if (!byLabel.has(b.labelM)) byLabel.set(b.labelM, []);
+      byLabel.get(b.labelM).push(b);
     }
-    boardMesh.instanceMatrix.needsUpdate = true;
-    group.add(boardMesh);
+
+    const boardGeo = new THREE.PlaneGeometry(1.4, 0.72);
+    for (const [labelM, list] of byLabel) {
+      const boardMat = new THREE.MeshStandardMaterial({
+        map: distanceBoardTexture(labelM, THREE),
+        roughness: 0.72,
+        metalness: 0,
+        side: THREE.DoubleSide,
+      });
+      const boardMesh = new THREE.InstancedMesh(boardGeo, boardMat, list.length);
+      boardMesh.name = `distanceBoards${labelM}`;
+      boardMesh.castShadow = boardMesh.receiveShadow = true;
+
+      const dummy = new THREE.Object3D();
+      for (let i = 0; i < list.length; i++) {
+        const b = list[i];
+        dummy.position.set(b.x, (typeof baseY === 'function' ? baseY(b.x, b.z) : baseY) + 1.05, b.z);
+        dummy.lookAt(b.lookX, 1.05, b.lookZ);
+        dummy.updateMatrix();
+        boardMesh.setMatrixAt(i, dummy.matrix);
+      }
+      boardMesh.instanceMatrix.needsUpdate = true;
+      group.add(boardMesh);
+    }
   }
 
   if (stacks.length) {
