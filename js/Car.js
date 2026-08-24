@@ -11,7 +11,7 @@ import {
 import { MASS, G, WB, LR, LF } from './physics/constants.js';
 import { cockpitSteerAngle, followSteerAngle } from './render/cockpitSteer.js';
 import {
-  createCarEffects, updateCarEffects, updateBrakeGlow,
+  createCarEffects, updateCarEffects, updateBrakeGlow, bindSoftParticleDepth,
 } from './render/carEffects.js';
 import {
   wingWeights, deformBody, wheelCollapse, paintWear, damageSignature,
@@ -19,11 +19,24 @@ import {
 } from './render/meshDamage.js';
 import { enableCarParticleSystems } from './render/carParticleBackend.js';
 import {
-  hubBaseY, chassisAttitudeRotation, wheelRootPosition, suspensionHubOffset,
-  MESH_FORWARD_OFFSET, AUTHORED_TRACK_HALF, WHEEL_MESH_YAW,
-  tyreSquash, tyreSquashScales, tyreSquashDrop,
+  AUTHORED_HUB_FORWARD, AUTHORED_TRACK_HALF, MESH_FORWARD_OFFSET,
+  hubBaseY, chassisAttitudeRotation, wheelRootPosition,
+  WHEEL_MESH_YAW, tyreSquash, tyreSquashScales, tyreSquashDrop,
+  TYRE_CONTACT_RADIUS,
 } from './render/wheelVisual.js';
 import { WHEEL_Y } from './physics/surface.js';
+import { WHEEL_RADIUS } from './physics/wheel.js';
+import {
+  planShellFit, partNameFromNode, outermostWheelNodes, planShellYaw,
+  partitionIndexedTriangles, WHEEL_CORNER_NAMES, MIN_WHEEL_TRIANGLES,
+  remapIndexedSubset, wheelScaleFromBox,
+} from './mod/fitCarShell.js';
+import { FZ_STATIC } from './physics/suspension.js';
+import { canUseClearcoatMaps } from './render/clearcoatMaps.js';
+import {
+  CONTACT_PATCH_Y, CONTACT_PATCH_SIZE, CONTACT_CHASSIS_OPACITY_CSM,
+  CONTACT_CHASSIS_OPACITY_FULL, contactPatchOpacity, softContactDiscRGBA,
+} from './render/contactPatch.js';
 
 const DEG90 = Math.PI / 2;
 const clampUnit = v => Math.max(-1, Math.min(1, v));
@@ -37,10 +50,11 @@ export class Car {
    * @param {THREE.Scene} scene
    * @param {{ backend?: 'webgl' | 'webgpu' }} [options]
    */
-  constructor(scene, { backend = 'webgl' } = {}) {
+  constructor(scene, { backend = 'webgl', physicsMode = 'arcade' } = {}) {
     this.root = new THREE.Object3D();
     scene.add(this.root);
-    this._particles = enableCarParticleSystems(backend);
+    this._backend = backend === 'webgpu' ? 'webgpu' : 'webgl';
+    this._particles = enableCarParticleSystems(this._backend);
 
     // Yaw-free pitch/roll carrier. It must sit OUTSIDE visualRoot's constant
     // 90° yaw: an Euler with y pinned at 90° gimbal-locks its x and z into a
@@ -72,7 +86,7 @@ export class Car {
     this.lrw = this._makeWheel(0, 0, 0);
     this.rrw = this._makeWheel(0, 0, 0);
 
-    this.vehicle = createVehicle();
+    this.vehicle = createVehicle({ physicsMode });
     this._braking = false;
     // Reused every frame: the render pose is interpolated between the last two
     // sim states, and the inner loop is not allowed to allocate.
@@ -86,6 +100,12 @@ export class Car {
     this._tyreMeshesRear = [];
     this._tyreTempFront = 0;
     this._tyreTempRear = 0;
+    this._externalModel = null;
+    // Shell wheels moved onto the rig's spin pivots, and the stock wheel meshes
+    // they replaced — both needed to undo the swap on `clearExternalModel`.
+    this._adoptedWheels = [];
+    this._stockWheelsHidden = [];
+    this._shellFit = null;
 
     this.input = { forward: false, reverse: false, left: false, right: false, brake: false };
 
@@ -94,6 +114,7 @@ export class Car {
     // wheel world positions they emit from are only known once the car has moved.
     this._scene = scene;
     this._fx = null;
+    this._smokeBudget = 1;
     this._fxState = {
       sim: null,
       wheels: [
@@ -178,6 +199,341 @@ export class Car {
   }
 
   /**
+   * Swap the bundled body shell for a user-supplied glTF. Physics stays on the
+   * default rig — you bring the visuals you have rights to.
+   *
+   * The shell is scaled and seated from its own wheelbase (see `fitCarShell`),
+   * because downloaded models arrive at whatever scale their author used: the
+   * catalog's AMR23 is authored 3.93 m long against a real car's 5.6 m, so
+   * before this it loaded smaller than the rig's own tyres and sunk into the
+   * road. Its wheels are then moved onto the rig's spin pivots, so the shell's
+   * own rims steer, spin and squash with the physics instead of standing still
+   * while a second set of stock wheels turns through them.
+   *
+   * `hasOwnWheels` is the fallback for shells whose tyres cannot be peeled out
+   * of the body (see `carCatalog.js`). Named wheel groups are adopted first;
+   * nameless welded tyres are split off by position and then adopted the same
+   * way. Only if that also fails do we hide the rig's wheels wholesale.
+   *
+   * @param {THREE.Object3D} modelRoot
+   * @param {{ hasOwnWheels?: boolean }} [opts]
+   * @returns {{ method: string, scale: number, wheelsAdopted: number, stockWheelsHidden: number }}
+   */
+  loadExternalModel(modelRoot, { hasOwnWheels = false } = {}) {
+    this.clearExternalModel();
+    this._externalModel = modelRoot;
+    this.body.visible = false;
+    modelRoot.rotation.set(0, 0, 0);
+    modelRoot.position.set(0, 0, 0);
+    modelRoot.scale.setScalar(1);
+    this.visualRoot.add(modelRoot);
+
+    const fit = this._fitExternalModel(modelRoot);
+    this._adoptShellWheels(modelRoot, fit);
+    if (!this._adoptedWheels.length && !(fit.wheelNames || []).length) {
+      const extracted = this._extractWeldedWheels(modelRoot);
+      if (extracted) this._adoptShellWheels(modelRoot, extracted);
+    }
+    // Adoption already hid the stock wheels it replaced; this covers the shells
+    // where there was nothing to adopt but the wheels are in there anyway.
+    if (hasOwnWheels && !this._adoptedWheels.length) this._hideStockWheels();
+    return {
+      ...fit,
+      wheelsAdopted: this._adoptedWheels.length,
+      stockWheelsHidden: this._stockWheelsHidden.length,
+    };
+  }
+
+  /**
+   * Stop drawing the rig's wheel meshes. The wheel *objects* stay in the graph
+   * and keep moving, because the tyre smoke, marks and contact patches all read
+   * their world positions.
+   */
+  _hideStockWheels() {
+    for (const w of [this.lfw, this.rfw, this.lrw, this.rrw]) {
+      for (const child of w._spinPivot.children) {
+        if (child.visible && !this._adoptedWheels.includes(child)) {
+          this._stockWheelsHidden.push(child);
+          child.visible = false;
+        }
+      }
+    }
+  }
+
+  /** Scale and seat the shell from its own geometry. @returns {object} the plan */
+  _fitExternalModel(modelRoot) {
+    const parts = [];
+    const box = new THREE.Box3();
+    const centre = new THREE.Vector3();
+    const size = new THREE.Vector3();
+    const inv = new THREE.Matrix4();
+    modelRoot.updateMatrixWorld(true);
+    inv.copy(modelRoot.matrixWorld).invert();
+    modelRoot.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      box.setFromObject(o);
+      if (box.isEmpty()) return;
+      box.applyMatrix4(inv);
+      box.getCenter(centre);
+      box.getSize(size);
+      parts.push({
+        name: partNameFromNode(o, modelRoot),
+        cx: centre.x, cy: centre.y, cz: centre.z,
+        sx: size.x, sy: size.y, sz: size.z,
+      });
+    });
+
+    const fit = planShellFit(parts, {
+      wheelbase: WB,
+      wheelRadius: WHEEL_RADIUS,
+      frontHubX: LF,
+      rearHubX: -LR,
+    });
+    const yaw = fit.yaw ?? planShellYaw(parts);
+    modelRoot.rotation.y = yaw;
+    if (fit.method !== 'none') {
+      modelRoot.scale.setScalar(fit.scale);
+      modelRoot.position.set(fit.shiftX || 0, fit.lift, fit.shiftZ || 0);
+    }
+    modelRoot.updateMatrixWorld(true);
+    this._shellFit = { ...fit, yaw };
+    return this._shellFit;
+  }
+
+  /**
+   * Peel tyres out of a nameless welded shell so they can spin on the rig.
+   *
+   * AMR23 (and anything like it) is a handful of `Object_*` slices of the
+   * whole car, one material, wheels included. There are no groups to reparent.
+   * Vertices within a tyre-radius of each rig hub are split onto named groups;
+   * the leftover triangles stay as the body.
+   *
+   * @returns {{ wheelNames: string[] } | null}
+   */
+  _extractWeldedWheels(modelRoot) {
+    const meshes = [];
+    modelRoot.traverse((o) => {
+      if (o.isMesh && o.geometry?.attributes?.position) meshes.push(o);
+    });
+    if (!meshes.length) return null;
+
+    const hubs = [this.lfw, this.rfw, this.lrw, this.rrw].map((h) => {
+      const p = h.getWorldPosition(new THREE.Vector3());
+      this.visualRoot.worldToLocal(p);
+      return { x: p.x, y: p.y, z: p.z };
+    });
+    const radius = WHEEL_RADIUS * 1.55;
+    const halfWidth = WHEEL_RADIUS * 0.95;
+
+    const vertex = new THREE.Vector3();
+    const frames = [];
+    for (const mesh of meshes) {
+      mesh.updateMatrixWorld(true);
+      const pos = mesh.geometry.attributes.position;
+      const frame = new Float32Array(pos.count * 3);
+      for (let i = 0; i < pos.count; i++) {
+        vertex.fromBufferAttribute(pos, i);
+        mesh.localToWorld(vertex);
+        this.visualRoot.worldToLocal(vertex);
+        frame[i * 3] = vertex.x;
+        frame[i * 3 + 1] = vertex.y;
+        frame[i * 3 + 2] = vertex.z;
+      }
+      frames.push(frame);
+    }
+
+    const partitions = frames.map((frame, i) => {
+      const geo = meshes[i].geometry;
+      const idx = geo.index
+        ? Array.from(geo.index.array)
+        : sequentialIndices(geo.attributes.position.count);
+      return partitionIndexedTriangles(frame, idx, hubs, radius, halfWidth);
+    });
+    const counts = [0, 0, 0, 0];
+    for (const part of partitions) {
+      for (let c = 0; c < 4; c++) counts[c] += part.wheels[c].length / 3;
+    }
+    if (!counts.every(n => n >= MIN_WHEEL_TRIANGLES)) return null;
+
+    const groups = WHEEL_CORNER_NAMES.map((name) => {
+      const g = new THREE.Group();
+      g.name = name;
+      modelRoot.add(g);
+      return g;
+    });
+    for (let i = 0; i < meshes.length; i++) {
+      const mesh = meshes[i];
+      const { body, wheels } = partitions[i];
+      for (let c = 0; c < 4; c++) {
+        if (wheels[c].length < 3) continue;
+        const wheelGeo = this._compactIndexedGeometry(mesh.geometry, wheels[c]);
+        const wheelMesh = new THREE.Mesh(wheelGeo, mesh.material);
+        wheelMesh.castShadow = mesh.castShadow;
+        wheelMesh.receiveShadow = mesh.receiveShadow;
+        mesh.parent.add(wheelMesh);
+        wheelMesh.position.copy(mesh.position);
+        wheelMesh.quaternion.copy(mesh.quaternion);
+        wheelMesh.scale.copy(mesh.scale);
+        groups[c].attach(wheelMesh);
+      }
+      if (body.length >= 3) {
+        mesh.geometry.setIndex(body);
+        mesh.geometry.computeBoundingBox();
+        mesh.geometry.computeBoundingSphere();
+      } else {
+        mesh.visible = false;
+      }
+    }
+    return { wheelNames: WHEEL_CORNER_NAMES.slice() };
+  }
+
+  /**
+   * Copy only the vertices an extracted tyre actually uses. Sharing the body's
+   * 65k-vert buffer left `computeBoundingBox` the size of the whole car, so
+   * every corner group snapped onto the same hub.
+   *
+   * @param {THREE.BufferGeometry} src
+   * @param {number[]} indices
+   */
+  _compactIndexedGeometry(src, indices) {
+    const pos = src.getAttribute('position');
+    const { count, indices: remap, used } = remapIndexedSubset(pos.count, indices);
+    const geo = new THREE.BufferGeometry();
+    for (const name of Object.keys(src.attributes)) {
+      const attr = src.getAttribute(name);
+      const item = attr.itemSize;
+      const array = new attr.array.constructor(count * item);
+      for (let old = 0; old < used.length; old++) {
+        const neu = used[old];
+        if (neu < 0) continue;
+        for (let k = 0; k < item; k++) {
+          array[neu * item + k] = attr.getComponent(old, k);
+        }
+      }
+      geo.setAttribute(name, new THREE.BufferAttribute(array, item, attr.normalized));
+    }
+    geo.setIndex(remap);
+    geo.computeBoundingBox();
+    geo.computeBoundingSphere();
+    return geo;
+  }
+
+  /**
+   * Move the shell's own wheels onto the rig's spin pivots, matched to the
+   * nearest hub in world space.
+   *
+   * Nearest-hub matching rather than reading front/rear off the names: authors
+   * label wheels every possible way ("Wheel_FL", "tyre.001", "Rim_L_Front"),
+   * and the geometry already says which corner each one is in. Anything the
+   * shell provides replaces the stock wheel mesh at that corner; corners the
+   * shell does not cover keep the stock wheel, so a body-only shell still rolls.
+   */
+  _adoptShellWheels(modelRoot, fit) {
+    const hubs = [this.lfw, this.rfw, this.lrw, this.rrw];
+    if (!fit?.wheelNames?.length) return;
+    const found = outermostWheelNodes(modelRoot, fit.wheelNames);
+    if (!found.length) return;
+
+    const hubWorld = hubs.map((h) => h.getWorldPosition(new THREE.Vector3()));
+    const meshWorld = new THREE.Vector3();
+    const box = new THREE.Box3();
+    const centre = new THREE.Vector3();
+    const hubPos = new THREE.Vector3();
+    const worldPos = new THREE.Vector3();
+    const covered = new Set();
+    const ordered = fit.wheelNames.length === 4
+      && WHEEL_CORNER_NAMES.every((n, i) => fit.wheelNames[i] === n);
+    for (const node of found) {
+      node.updateMatrixWorld(true);
+      let best = -1;
+      if (ordered) {
+        best = WHEEL_CORNER_NAMES.indexOf(node.name);
+        if (best < 0 || covered.has(best)) continue;
+      } else {
+        box.setFromObject(node, true);
+        box.getCenter(meshWorld);
+        let bestD = Infinity;
+        for (let i = 0; i < hubWorld.length; i++) {
+          if (covered.has(i)) continue;
+          const d = meshWorld.distanceToSquared(hubWorld[i]);
+          if (d < bestD) { bestD = d; best = i; }
+        }
+        if (best < 0) continue;
+      }
+      const pivot = hubs[best]._spinPivot;
+      // `attach` keeps the group where it looks like it is now. Sketchfab
+      // wheel groups (FL_6, rear left) do not have their origin at the hub —
+      // zeroing position flung the tyre off the axle. It also decomposes the
+      // shell's 90° yaw into a non-uniform scale (W14 Y was ~0.58 of X/Z).
+      // Reset to uniform, scale onto the physics radius, then sit the bbox
+      // centre on the hub so spin orbits the rim.
+      pivot.attach(node);
+      node.scale.set(1, 1, 1);
+      node.updateMatrixWorld(true);
+      box.setFromObject(node, true);
+      box.getSize(meshWorld);
+      node.scale.setScalar(wheelScaleFromBox(meshWorld.x, meshWorld.y, meshWorld.z, WHEEL_RADIUS));
+      node.updateMatrixWorld(true);
+      box.setFromObject(node, true);
+      box.getCenter(centre);
+      pivot.getWorldPosition(hubPos);
+      node.getWorldPosition(worldPos);
+      worldPos.x += hubPos.x - centre.x;
+      worldPos.y += hubPos.y - centre.y;
+      worldPos.z += hubPos.z - centre.z;
+      pivot.worldToLocal(worldPos);
+      node.position.copy(worldPos);
+      this._adoptedWheels.push(node);
+      covered.add(best);
+    }
+    // Hide only the stock wheels the shell actually replaced.
+    for (const i of covered) {
+      for (const child of hubs[i]._spinPivot.children) {
+        if (!this._adoptedWheels.includes(child)) {
+          this._stockWheelsHidden.push(child);
+          child.visible = false;
+        }
+      }
+    }
+  }
+
+  /** Restore the bundled body and dispose any catalog / drop-in shell. */
+  clearExternalModel() {
+    for (const node of this._adoptedWheels) {
+      node.parent?.remove(node);
+      node.traverse((o) => this._disposeMeshResources(o, { sharedOk: true }));
+    }
+    this._adoptedWheels.length = 0;
+    for (const mesh of this._stockWheelsHidden) mesh.visible = true;
+    this._stockWheelsHidden.length = 0;
+    this._shellFit = null;
+
+    if (this._externalModel) {
+      this.visualRoot.remove(this._externalModel);
+      this._externalModel.traverse(o => this._disposeMeshResources(o));
+      this._externalModel = null;
+    }
+    if (this.body) this.body.visible = true;
+  }
+
+  /**
+   * @param {THREE.Object3D} o
+   * @param {{ sharedOk?: boolean }} [opts] skip GPU dispose of buffers shared
+   *   with the body — peeled tyres reuse the body's vertex attributes.
+   */
+  _disposeMeshResources(o, { sharedOk = false } = {}) {
+    if (!o.isMesh) return;
+    const geo = o.geometry;
+    if (geo) {
+      if (sharedOk && geo.userData.sharedFrom) geo.setIndex(null);
+      else geo.dispose?.();
+    }
+    if (sharedOk && geo?.userData.sharedFrom) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) m?.dispose?.();
+  }
+
+  /**
    * @param {THREE.Texture} [environment] PMREM environment for the metallic and
    *   glossy parts. Without one, `metalness` has nothing to reflect and reads black.
    */
@@ -224,40 +580,43 @@ export class Car {
       THREE.NoColorSpace,
       { wrap: true, repeat: [2, 2] }
     );
-    const clearcoatRoughTex = makeDataTex(
-      () => roughnessFromNoise({ size: 512, base: 0.045, variance: 0.012, seed: 14 }),
-      THREE.NoColorSpace,
-      { wrap: true, repeat: [2, 2] }
-    );
-    const clearcoatNormalTex = makeDataTex(
-      () => normalFromHeight({ size: 512, strength: 0.65, seed: 15, angle: 0.12 }),
-      THREE.NoColorSpace,
-      { wrap: true, repeat: [2, 2] }
-    );
     const bodySpecTex = makeDataTex(
       () => specularIntensityFromNoise({ size: 512, base: 0.55, variance: 0.1, seed: 16 }),
       THREE.NoColorSpace,
       { wrap: true, repeat: [2, 2] }
     );
 
+    // WebGPU drops MeshPhysicalMaterial draws that bind DataTexture clearcoat maps.
+    const useClearcoatMaps = canUseClearcoatMaps(this._backend);
+    const clearcoatMaps = useClearcoatMaps ? {
+      clearcoatRoughnessMap: makeDataTex(
+        () => roughnessFromNoise({ size: 512, base: 0.045, variance: 0.012, seed: 14 }),
+        THREE.NoColorSpace,
+        { wrap: true, repeat: [2, 2] }
+      ),
+      clearcoatNormalMap: makeDataTex(
+        () => normalFromHeight({ size: 512, strength: 0.65, seed: 15, angle: 0.12 }),
+        THREE.NoColorSpace,
+        { wrap: true, repeat: [2, 2] }
+      ),
+      clearcoatNormalScale: new THREE.Vector2(0.25, 0.25),
+    } : {};
+
     this.bodyPaintMat = new THREE.MeshPhysicalMaterial({
       map: tex('obj/textures/BodyPaint.jpg'),
-      envMap, envMapIntensity: 0.55,
-      roughness: 0.42, roughnessMap: bodyRoughTex,
+      envMap, envMapIntensity: 0.72,
+      roughness: 0.38, roughnessMap: bodyRoughTex,
       metalness: 0.0, metalnessMap: bodyMetalTex,
       normalMap: bodyNormalTex,
       normalScale: new THREE.Vector2(0.45, 0.45),
-      specularIntensity: 0.55,
+      specularIntensity: 0.62,
       specularIntensityMap: bodySpecTex,
 
-      clearcoat: 0.4,
-      clearcoatRoughness: 0.14,
-      clearcoatRoughnessMap: clearcoatRoughTex,
-      clearcoatNormalMap: clearcoatNormalTex,
-      clearcoatNormalScale: new THREE.Vector2(0.25, 0.25),
+      clearcoat: 0.62,
+      clearcoatRoughness: 0.08,
+      ...clearcoatMaps,
 
-      anisotropy: 0.08,
-      reflectivity: 0.45,
+      reflectivity: 0.55,
     });
     this.brakeMat = new THREE.MeshStandardMaterial({
       color: 0x800000, map: tex('obj/textures/RearLights.jpg'),
@@ -282,14 +641,18 @@ export class Car {
 
       clearcoat: 0.12,
       clearcoatRoughness: 0.18,
-      clearcoatNormalMap: carbonNormalTex,
-      clearcoatNormalScale: new THREE.Vector2(0.3, 0.3),
-      // Carbon weave is anisotropic *along the weave*, and the direction matters
-      // as much as the strength: an anisotropic highlight with no rotation
-      // stretches along the model's UV axis, which on a curved panel is nowhere in
-      // particular. The 2x2 twill on these parts runs at 45 degrees.
-      anisotropy: 0.45,
-      anisotropyRotation: Math.PI / 4,
+      ...(useClearcoatMaps ? {
+        clearcoatNormalMap: carbonNormalTex,
+        clearcoatNormalScale: new THREE.Vector2(0.3, 0.3),
+      } : {}),
+      // No `anisotropy` here, however much a woven twill wants it: these meshes
+      // carry no tangent attribute, so three.js derives the anisotropy frame
+      // from UV screen-space derivatives, and that frame collapses wherever the
+      // derivatives do — precisely the near-edge-on strips this material covers
+      // (diffuser strakes, floor lip, wing element edges). A stretched specular
+      // lobe on a collapsed frame reads as pure-white neon tubing: it measured
+      // 62% of all clipped pixels on the car. Bringing it back means authoring
+      // real tangents, not a smaller number.
       reflectivity: 0.35,
     });
 
@@ -330,15 +693,20 @@ export class Car {
 
     const tyreBaseColor = new THREE.Color(0xffffff);
     const makeTyreMat = (baseRoughness) => {
-      const m = new THREE.MeshStandardMaterial({
+      const m = new THREE.MeshPhysicalMaterial({
         map: tex('obj/textures/Tyre.jpg'),
         envMap,
-        envMapIntensity: 0.04,
+        envMapIntensity: 0.14,
         roughness: baseRoughness,
         roughnessMap: tyreRoughTex,
         metalness: 0.0,
         normalMap: tyreNormalTex,
-        normalScale: new THREE.Vector2(0.25, 0.25),
+        normalScale: new THREE.Vector2(0.32, 0.32),
+        clearcoat: 0.08,
+        clearcoatRoughness: 0.82,
+        sheen: 0.12,
+        sheenRoughness: 0.9,
+        sheenColor: new THREE.Color(0x1a1a1a),
       });
       m.userData.baseRoughness = baseRoughness;
       m.userData.baseColor = tyreBaseColor.clone();
@@ -353,7 +721,10 @@ export class Car {
       // fully metallic and fairly sharp. `metalness: 0.4` was neither — a
       // half-metal reads as painted plastic, and these are the parts a low camera
       // sees against the sky where a wrong specular is most obvious.
-      Suspension:    { x:0,       y:0.4044,  z:-0.3071, mat: new THREE.MeshPhysicalMaterial({ color:0x5a5d60, envMap, envMapIntensity:0.55, roughness:0.34, metalness:1.0, anisotropy:0.5, anisotropyRotation:Math.PI / 2 }) },
+      // Anisotropy omitted deliberately: this mesh has no uv attribute at all,
+      // so the derived anisotropy frame is undefined, not merely arbitrary. See
+      // carbonMat above — on these thin wishbones it blew the arms to white.
+      Suspension:    { x:0,       y:0.4044,  z:-0.3071, mat: new THREE.MeshPhysicalMaterial({ color:0x5a5d60, envMap, envMapIntensity:0.55, roughness:0.34, metalness:1.0 }) },
       InsideBlack:   { x:0,       y:0.5773,  z:0.729,   mat: blackMat },
       GlossyBlack:   { x:0,       y:0.4115,  z:-0.7112, mat: carbonMat },
       Chrome:        { x:0,       y:0.5867,  z:0.3202,  mat: new THREE.MeshStandardMaterial({ color:0xcccccc, envMap, envMapIntensity:0.35, roughness:0.22, metalness:0.9 }) },
@@ -449,40 +820,100 @@ export class Car {
     const shadow = new THREE.Mesh(
       // The blob's proportions are baked for a square quad — keep the aspect.
       new THREE.PlaneGeometry(7.2, 7.2),
-      new THREE.MeshBasicMaterial({
-        map,
-        side: THREE.FrontSide,
-        transparent: true,
-        depthWrite: false,
-        depthTest: true,
-        blending: THREE.MultiplyBlending,
-        // The only blend path three offers for MultiplyBlending; without it the
-        // renderer logs "MultiplyBlending requires material.premultipliedAlpha".
-        premultipliedAlpha: true,
-        toneMapped: false,
-        polygonOffset: true,
-        polygonOffsetFactor: -6,
-        polygonOffsetUnits: -6,
-      })
+      this._contactMultiplyMaterial(map),
     );
     // Child of root, so +X is the car's right and -Z is forward. The blob was
     // baked around the bodywork, so it follows the body's forward shift.
     shadow.rotation.x = -DEG90;
-    shadow.position.set(0.08, 0.026, 0.35 - MESH_FORWARD_OFFSET);
+    shadow.position.set(0.08, CONTACT_PATCH_Y, 0.35 - MESH_FORWARD_OFFSET);
     shadow.renderOrder = 1;
     shadow.castShadow = false;
     shadow.receiveShadow = false;
     this._contactShadow = shadow;
     this.root.add(shadow);
+    this._addWheelContactPatches();
+  }
+
+  /** Multiply material shared by the chassis blob and the per-tyre discs. */
+  _contactMultiplyMaterial(map) {
+    return new THREE.MeshBasicMaterial({
+      map,
+      side: THREE.FrontSide,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.MultiplyBlending,
+      // The only blend path three offers for MultiplyBlending; without it the
+      // renderer logs "MultiplyBlending requires material.premultipliedAlpha".
+      premultipliedAlpha: true,
+      toneMapped: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -6,
+      polygonOffsetUnits: -6,
+    });
+  }
+
+  /**
+   * Soft discs under each tyre. Parent to the hub so they follow steer; local Y
+   * cancels the hub height so the disc sits on the asphalt even when the tyre
+   * is squashed (the hub drops by the same amount the carcass flattens).
+   */
+  _addWheelContactPatches() {
+    const { data, size } = softContactDiscRGBA(64);
+    const map = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+    map.colorSpace = THREE.SRGBColorSpace;
+    map.needsUpdate = true;
+    map.anisotropy = 4;
+
+    const wheels = [this.lfw, this.rfw, this.lrw, this.rrw];
+    this._wheelContactPatches = [];
+    for (let i = 0; i < 4; i++) {
+      const w = wheels[i];
+      if (!w) continue;
+      const disc = new THREE.Mesh(
+        new THREE.PlaneGeometry(CONTACT_PATCH_SIZE, CONTACT_PATCH_SIZE),
+        this._contactMultiplyMaterial(map),
+      );
+      disc.rotation.x = -DEG90;
+      // Hub origin is TYRE_CONTACT_RADIUS above the road; cancel that, then sit
+      // in the same depth band as the chassis blob.
+      disc.position.set(0, -TYRE_CONTACT_RADIUS + CONTACT_PATCH_Y, 0);
+      disc.renderOrder = 2;
+      disc.castShadow = false;
+      disc.receiveShadow = false;
+      w.add(disc);
+      w._contactPatch = disc;
+      this._wheelContactPatches.push(disc);
+    }
   }
 
   /**
    * The baked blob and the real-time sun shadow both darken the patch under
    * the car; with MultiplyBlending they stack into a double-dark rectangle.
-   * The caller hides the blob whenever cascaded shadows are on.
+   * When CSM is on the blob is faded rather than removed so the tyres still
+   * have contact shading the cascades miss at close range.
    */
-  setContactShadowEnabled(on) {
-    if (this._contactShadow) this._contactShadow.visible = on;
+  setContactShadowEnabled(csmActive) {
+    this._csmContactActive = Boolean(csmActive);
+    if (this._contactShadow) {
+      this._contactShadow.visible = true;
+      this._contactShadow.material.opacity = csmActive
+        ? CONTACT_CHASSIS_OPACITY_CSM
+        : CONTACT_CHASSIS_OPACITY_FULL;
+    }
+    this._updateWheelContactOpacity();
+  }
+
+  /** Fade each tyre disc with load so airborne corners leave no floating blot. */
+  _updateWheelContactOpacity(fz) {
+    const patches = this._wheelContactPatches;
+    if (!patches?.length) return;
+    const csm = Boolean(this._csmContactActive);
+    for (let i = 0; i < patches.length; i++) {
+      const load = fz ? fz[i] : FZ_STATIC[i];
+      patches[i].material.opacity = contactPatchOpacity(load, FZ_STATIC[i], csm);
+      patches[i].visible = patches[i].material.opacity > 0.02;
+    }
   }
 
   /**
@@ -526,7 +957,6 @@ export class Car {
       const { camber, lift } = wheelCollapse(dmg.wheels[i]);
       const hubY = this.vehicle?.car?.surfaces
         ? wheelRootPosition(i, this.vehicle.car.surfaces[i], telemetryOf(this.vehicle).chassisY).y
-          + suspensionHubOffset(this.vehicle.car.suspension, i)
         : hubBaseY(i);
       w.rotation.z = -camber * Math.sign(w.position.x || 1);
       w.position.y = hubY + lift;
@@ -656,12 +1086,13 @@ export class Car {
    * failure mode that makes a setup screen untrustworthy: the slider moves, some of
    * the car follows, and nobody can tell which part.
    */
-  rebuild(setup) {
+  rebuild(setup, { physicsMode } = {}) {
     const previous = this.vehicle;
+    const mode = physicsMode ?? previous.physicsMode ?? 'arcade';
     this.vehicle = createVehicle({
-      x: previous.spawn.x, z: previous.spawn.z, yaw: previous.spawn.yaw, setup,
+      x: previous.spawn.x, z: previous.spawn.z, yaw: previous.spawn.yaw,
+      setup, physicsMode: mode,
     });
-    this.vehicle.aids = previous.aids;
     this.setup = setup;
     return this.vehicle;
   }
@@ -685,6 +1116,17 @@ export class Car {
     return this._fx?.marks?.texture ?? null;
   }
 
+  /** Quality scaler: 1 is Ultra, 0.6 is Balanced. */
+  setSmokeBudget(scale) {
+    this._smokeBudget = Math.max(0, Math.min(1, scale));
+    if (this._fx) this._fx.smokeBudget = this._smokeBudget;
+  }
+
+  /** WebGL: last-frame scene depth for soft particle fade. */
+  bindParticleDepth(opts) {
+    if (this._fx) bindSoftParticleDepth(this._fx, opts);
+  }
+
   updateSteering(dt) {
     updateSteering(this.vehicle, this.input, dt);
   }
@@ -695,7 +1137,11 @@ export class Car {
     advance(v, this.input, track, dt);
 
     if (!this._fx) {
-      this._fx = createCarEffects(this._scene, { particles: this._particles });
+      this._fx = createCarEffects(this._scene, {
+        particles: this._particles,
+        backend: this._backend,
+      });
+      this._fx.smokeBudget = this._smokeBudget;
     }
     // Interpolated, not raw: the sim runs at a fixed 600 Hz and the display does
     // not, so drawing the latest state directly shows a step pattern of 10, 10,
@@ -703,8 +1149,7 @@ export class Car {
     const sim = telemetryOf(v);
     const pose = renderPose(v, this._pose);
     // Y follows the surface, and the body takes the road's attitude plus its own.
-    // The car used to sit on a plane at y = 0 whatever the track did.
-    this.root.position.set(pose.x, sim.chassisY, pose.z);
+    this.root.position.set(pose.x, pose.chassisY, pose.z);
     this.root.rotation.y = pose.yaw;
     /**
      * The chassis attitude alone. It already contains the road.
@@ -728,7 +1173,7 @@ export class Car {
      * the root origin, which is exactly the suspension model's own reference:
      * corner heights are `zc + ax·pitch + ay·roll` about chassisY.
      */
-    const att = chassisAttitudeRotation(sim.pitch, sim.roll);
+    const att = chassisAttitudeRotation(pose.pitch, pose.roll);
     this.attitude.rotation.x = att.x;
     this.attitude.rotation.z = att.z;
 
@@ -746,9 +1191,15 @@ export class Car {
     for (let i = 0; i < 4; i++) {
       const w = wheels[i];
       if (!w) continue;
-      const p = wheelRootPosition(i, v.car.surfaces[i], sim.chassisY);
+      const p = wheelRootPosition(i, v.car.surfaces[i], pose.chassisY);
       const drop = tyreSquashDrop(i < 2 ? squashF : squashR);
-      w.position.set(p.x, p.y + suspensionHubOffset(susp, i) - drop, p.z);
+      // Ground-anchored hubs already encode suspension travel: the body heaves
+      // and pitches on `chassisY` / attitude while the tyre stays on the road.
+      // Adding `suspensionHubOffset` (zw − zci) on top double-counted that
+      // compression and made a 50 mm kerb read as twice the travel.
+      w.position.set(p.x, p.y - drop, p.z);
+      // Keep the multiply disc flat on the road when the hub takes camber damage.
+      if (w._contactPatch) w._contactPatch.rotation.z = -w.rotation.z;
     }
 
     // Brake glow from disc temperature, which is the same number that sets pad
@@ -769,6 +1220,7 @@ export class Car {
     }
 
     this._updateEffects(v, sim, pose, track, dt);
+    this._updateWheelContactOpacity(sim.fz);
     this._applyMeshDamage(sim.damage);
 
     // Tyre micro “life”: heat and wear roughness, and a squash from the real
@@ -809,4 +1261,10 @@ export class Car {
       updateTyreMat(this._tyreMatRear, this._tyreTempRear);
     }
   }
+}
+
+function sequentialIndices(count) {
+  const idx = new Array(count);
+  for (let i = 0; i < count; i++) idx[i] = i;
+  return idx;
 }

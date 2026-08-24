@@ -18,6 +18,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { Car } from './Car.js';
+import { renderPose } from './physics/vehicle.js';
 import { unpackBinMesh } from './binMesh.js';
 import { buildCenterline } from './track/centerline.js';
 import { SILVERSTONE_WAYPOINTS } from './track/silverstoneWaypoints.js';
@@ -26,7 +27,7 @@ import { WHEEL_RADIUS } from './physics/wheel.js';
 import {
   TYRE_CONTACT_RADIUS, AUTHORED_TRACK_HALF, MESH_FORWARD_OFFSET,
   chassisAttitudeRotation, staticRakePitch, WHEEL_MESH_YAW,
-  suspensionHubOffset, tyreSquash, tyreSquashDrop,
+  tyreSquash, tyreSquashDrop,
 } from './render/wheelVisual.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -191,6 +192,42 @@ test('the suspension mesh reaches the wheels it is drawn with', () => {
   }
 });
 
+test('no car material asks for anisotropy the geometry cannot orient', () => {
+  // `MeshPhysicalMaterial.anisotropy` stretches the specular lobe along a
+  // tangent. Nothing here can supply one: the authored .bin format carries
+  // position, normal and uv and no tangent channel, and Suspension.bin has no
+  // uv either. Absent a `tangent` attribute three.js derives the frame from UV
+  // screen-space derivatives — arbitrary on a curved panel, undefined with no
+  // uv, and collapsed wherever those derivatives collapse, which is exactly
+  // the thin near-edge-on parts (diffuser strakes, floor lip, wishbones). A
+  // stretched lobe on a collapsed frame reads as white neon tubing: measured
+  // headless, carbon and suspension together owned 94% of the clipped pixels
+  // on the car. Bringing anisotropy back means authoring tangents, not picking
+  // a smaller number — so the rule is what gets pinned.
+  //
+  // Asserted against the source rather than the scene graph on purpose: the
+  // meshes are fetched asynchronously, so in Node `car.root` holds no geometry
+  // at all and a traversal here would pass no matter what the materials say.
+  const susp = loadBin('Suspension.bin');
+  assert.equal('tangent' in susp, false,
+    'the .bin format grew a tangent channel — this rule can be revisited');
+  assert.equal(susp.uv?.length ?? 0, 0,
+    'Suspension.bin grew uvs — this rule can be revisited');
+
+  const offenders = readFileSync(join(here, 'Car.js'), 'utf8').split('\n')
+    .map((text, i) => ({ text: text.trim(), line: i + 1 }))
+    // Texture filtering (`tex.anisotropy = 8`) is a different property that
+    // happens to share the name; it is assigned, never an object-literal key,
+    // and its levels are >= 2 where a material's are clamped to 0..1.
+    .filter(({ text }) => {
+      const m = /(?:^|[{,\s])anisotropy(Rotation)?\s*:\s*([^,}]+)/.exec(text);
+      return m && (m[1] || !(Number.parseFloat(m[2]) >= 2));
+    })
+    .map(({ text, line }) => `Car.js:${line}  ${text}`);
+  assert.deepEqual(offenders, [],
+    `anisotropy needs authored tangents; found:\n  ${offenders.join('\n  ')}`);
+});
+
 test('the body sits nose-down at rest and rolls right-side-down on positive roll', () => {
   const { car, yaw } = grid;
   assert.ok(Math.abs(car.attitude.rotation.x - staticRakePitch()) < 0.005,
@@ -244,18 +281,17 @@ test('under aero load the hubs drop by the tyre squash, keeping contact', () => 
   assert.ok(car.speed() > 20, 'the car got up to speed');
 
   const sim = car.simState();
-  const susp = car.vehicle.car.suspension;
+  const pose = renderPose(car.vehicle);
   const baseFzF = MASS * G * LR / WB;
   const squashF = tyreSquash((sim.fz[0] + sim.fz[1] - baseFzF) / baseFzF);
   assert.ok(squashF > 0.001, 'aero load squashes the front tyres');
 
   // Wheel local y is ground-anchored: contact radius above the (flat, 0-high)
-  // road minus the chassis height the root already carries, plus the live
-  // suspension offset — and now minus the squash drop.
+  // road minus the chassis height the root already carries, then the squash
+  // drop so a loaded tyre sinks rather than shrinking in place.
   const wheels = [car.lfw, car.rfw];
   for (let i = 0; i < 2; i++) {
-    const expected = TYRE_CONTACT_RADIUS - sim.chassisY
-      + suspensionHubOffset(susp, i) - tyreSquashDrop(squashF);
+    const expected = TYRE_CONTACT_RADIUS - pose.chassisY - tyreSquashDrop(squashF);
     assert.ok(Math.abs(wheels[i].position.y - expected) < 1e-9,
       `front hub ${wheels[i].position.y.toFixed(4)} vs ${expected.toFixed(4)} — `
       + 'a loaded tyre must sink, not shrink in place');
