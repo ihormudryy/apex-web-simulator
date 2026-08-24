@@ -69,11 +69,75 @@ test('dampers are asymmetric — rebound stiffer than bump', () => {
   assert.ok(Math.abs(damperForce(-0.01, 0)) > Math.abs(damperForce(0.01, 0)));
 });
 
-test('dampers are digressive, so a sharp input is not fought', () => {
+test('a hard ground step does not launch the chassis into the sky', () => {
+  // Deviation-coordinate suspension cancels gravity at equilibrium. When a kerb
+  // punches the car airborne, that cancellation used to leave the SPRUNG mass
+  // weightless — upward velocity from the hit never came back, and zc ran away
+  // to metres. Rejoining from the grass looked like a 1 m suspension.
+  const s = createSuspensionState();
+  const ground = [0, 0, 0, 0];
+  const load = { ground, aeroFront: 0, aeroRear: 0, ax: 0, ay: 0 };
+  for (let i = 0; i < Math.round(2 / DT); i++) step(s, load, DT);
+  ground.fill(0.05);
+  for (let i = 0; i < Math.round(2 / DT); i++) step(s, load, DT);
+  const err = Math.abs(s.zc - 0.05);
+  assert.ok(err < 0.03, `chassis at ${(s.zc * 1000).toFixed(0)} mm after a 50 mm step (want ~50)`);
+  assert.ok(Math.abs(s.vc) < 0.2, `still flying at vc=${s.vc.toFixed(2)} m/s`);
+});
+
+test('even a half-metre cliff settles back onto the road', () => {
+  const s = createSuspensionState();
+  const ground = [0, 0, 0, 0];
+  const load = { ground, aeroFront: 0, aeroRear: 0, ax: 0, ay: 0 };
+  for (let i = 0; i < Math.round(1 / DT); i++) step(s, load, DT);
+  ground.fill(0.5);
+  for (let i = 0; i < Math.round(3 / DT); i++) step(s, load, DT);
+  assert.ok(
+    Math.abs(s.zc - 0.5) < 0.08,
+    `chassis escaped to ${(s.zc * 1000).toFixed(0)} mm after a 500 mm step`,
+  );
+});
+
+test('bump damping is digressive, so a sharp kerb hit is not fought', () => {
   const slow = damperForce(DIGRESSIVE_KNEE * 0.5, 0) / (DIGRESSIVE_KNEE * 0.5);
   const fast = damperForce(DIGRESSIVE_KNEE * 8, 0) / (DIGRESSIVE_KNEE * 8);
   assert.ok(fast < slow * 0.8, `effective rate ${fast.toFixed(0)} vs ${slow.toFixed(0)}`);
   assert.ok(damperRate(1.0, 0) < damperRate(0.01, 0));
+});
+
+test('rebound damping stays linear, so the car settles after a step', () => {
+  // Digressive rebound was the "boing after rejoining": the unload after a kerb
+  // ran at 35% of the rebound rate and the platform rang for seconds.
+  const slow = damperForce(-DIGRESSIVE_KNEE * 0.5, 0) / (-DIGRESSIVE_KNEE * 0.5);
+  const fast = damperForce(-DIGRESSIVE_KNEE * 8, 0) / (-DIGRESSIVE_KNEE * 8);
+  assert.ok(
+    Math.abs(fast - slow) / slow < 0.05,
+    `rebound digressed: ${fast.toFixed(0)} vs ${slow.toFixed(0)}`,
+  );
+  assert.ok(Math.abs(damperRate(-1.0, 0) - damperRate(-0.01, 0)) < 1);
+});
+
+test('the platform settles after a kerb-sized ground drop instead of bouncing on', () => {
+  const s = createSuspensionState();
+  const ground = [0.05, 0.05, 0.05, 0.05];
+  const load = { ground, aeroFront: 6000, aeroRear: 9000, ax: 0, ay: 0 };
+  for (let i = 0; i < Math.round(2 / DT); i++) step(s, load, DT);
+  // Rejoin from runoff climbs the outer ramp over a few tenths, not as a cliff.
+  const rampSteps = Math.round(0.25 / DT);
+  for (let i = 0; i < rampSteps; i++) {
+    const h = 0.05 * (1 - (i + 1) / rampSteps);
+    ground.fill(h);
+    step(s, load, DT);
+  }
+  ground.fill(0);
+  const heave = [];
+  for (let i = 0; i < Math.round(1.5 / DT); i++) {
+    step(s, load, DT);
+    heave.push(s.zc);
+  }
+  const late = heave.slice(Math.round(0.4 / DT));
+  const p2p = (Math.max(...late) - Math.min(...late)) * 1000;
+  assert.ok(p2p < 10, `still ringing ${p2p.toFixed(1)} mm peak-to-peak after rejoin`);
 });
 
 test('damper force opposes motion and vanishes at rest', () => {
@@ -374,4 +438,93 @@ test('solve7 leaves a singular DOF alone instead of returning NaN', () => {
   b[0] = 5;                     // row 0 is entirely zero
   solve7(A, b);
   for (let i = 0; i < 7; i++) assert.ok(Number.isFinite(b[i]), `x${i} is ${b[i]}`);
+});
+
+test('a wheel left above the road settles back toward contact', () => {
+  const s = createSuspensionState();
+  s.zw[0] = 0.15;
+  s.zw[1] = 0.15;
+  const load = { ground: FLAT, ax: 0, ay: 0, gradeLong: 0 };
+  for (let i = 0; i < Math.round(1 / DT); i++) step(s, load, DT);
+  assert.ok(s.zw[0] < 0.05, `FL wheel still hovering at ${(s.zw[0] * 1000).toFixed(0)} mm`);
+  assert.ok(s.zw[1] < 0.05, `FR wheel still hovering at ${(s.zw[1] * 1000).toFixed(0)} mm`);
+});
+
+test('inertial loads are low-pass filtered so tyre chatter does not ring the body', () => {
+  const s = createSuspensionState();
+  const ground = [0, 0, 0, 0];
+  const load = { ground, aeroFront: 6000, aeroRear: 9000, ax: 0, ay: 0 };
+  for (let i = 0; i < Math.round(2 / DT); i++) step(s, load, DT);
+  const roll = [];
+  for (let i = 0; i < Math.round(1.5 / DT); i++) {
+    // Square-wave ay at ~100 Hz — tyre relaxation scale, not a real corner load.
+    load.ay = (i % 12 < 6 ? 1 : -1) * 8 * G;
+    step(s, load, DT);
+    roll.push(s.roll);
+  }
+  const late = roll.slice(Math.round(0.5 / DT));
+  const p2p = (Math.max(...late) - Math.min(...late)) * 180 / Math.PI;
+  assert.ok(p2p < 0.35, `body roll rang ${p2p.toFixed(2)} deg under ay chatter`);
+});
+
+test('crest recovery stays off during cornering roll unload', () => {
+  const s = createSuspensionState();
+  // Settle into a right-hand corner load — roll extends the inside front.
+  for (let i = 0; i < 400; i++) {
+    step(s, { ground: FLAT, ax: 0, ay: 1.2 * G, gradeLong: 0 }, DT);
+  }
+  const rollBefore = s.roll;
+  const pitchBefore = s.pitch;
+  for (let i = 0; i < 120; i++) {
+    step(s, { ground: FLAT, ax: 0, ay: 1.2 * G, gradeLong: 0 }, DT);
+  }
+  // Hover contact must not pull the platform into a high-frequency fight with roll.
+  assert.ok(Math.abs(s.roll - rollBefore) < 0.4 * DEG,
+    `roll moved ${((s.roll - rollBefore) / DEG).toFixed(2)} deg under sustained cornering`);
+  assert.ok(Math.abs(s.pitch - pitchBefore) < 0.25 * DEG,
+    `pitch moved ${((s.pitch - pitchBefore) / DEG).toFixed(2)} deg under sustained cornering`);
+});
+
+test('an unloaded front axle pitches toward the road plane instead of climbing', () => {
+  const s = createSuspensionState();
+  s.pitch = 3 * DEG;
+  s.zw[0] = 0.15;
+  s.zw[1] = 0.15;
+  const grade = -2 * DEG;
+  const load = { ground: FLAT, ax: 0, ay: 0, gradeLong: Math.tan(grade) };
+  for (let i = 0; i < 8; i++) step(s, load, DT);
+  assert.ok(s.pitch < 3 * DEG - 0.15 * DEG, `pitch stayed at ${(s.pitch / DEG).toFixed(2)} deg`);
+});
+
+// ---------------------------------------------------------------------------
+// The heave speed cap has to clear the speed the road descends at.
+//
+// It did not, and the failure was invisible as a constant: the chassis is
+// rate-limited to `MAX_HEAVE_SPEED`, the steepest part of this circuit falls
+// faster than that at racing speed, and a car that cannot descend as fast as
+// its own road falls behind by the difference every step until the heave hits
+// `MAX_HEAVE` and the wheels are dragged off the ground.
+// ---------------------------------------------------------------------------
+
+test('the chassis may descend at least as fast as the steepest road, at top speed', async () => {
+  const { MAX_HEAVE_SPEED } = await import('./suspension.js');
+  const { elevationAt } = await import('../track/elevation.js');
+  const { buildCenterline } = await import('../track/centerline.js');
+  const { SILVERSTONE_WAYPOINTS } = await import('../track/silverstoneWaypoints.js');
+
+  const cl = buildCenterline(SILVERSTONE_WAYPOINTS, 4000);
+  const step = 0.5;
+  let steepest = 0;
+  for (let s = 0; s < cl.length; s += step) {
+    const rise = elevationAt((s + step) / cl.length) - elevationAt(s / cl.length);
+    steepest = Math.max(steepest, Math.abs(rise) / step);
+  }
+  // The car's terminal speed. Faster than it reaches in practice, which is the
+  // point — the cap must not bind at the top of the range either.
+  const TOP_SPEED = 90;
+  const demanded = steepest * TOP_SPEED;
+  assert.ok(MAX_HEAVE_SPEED > demanded,
+    `road falls at ${demanded.toFixed(2)} m/s at ${TOP_SPEED} m/s `
+    + `(${(steepest * 100).toFixed(2)}% gradient) but the chassis is capped at `
+    + `${MAX_HEAVE_SPEED} m/s — the car cannot follow its own circuit`);
 });

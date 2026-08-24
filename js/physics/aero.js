@@ -41,7 +41,7 @@
  * a ground-effect car.
  */
 
-import { RHO, WB, LF, LR } from './constants.js';
+import { RHO, WB, LF, LR, G } from './constants.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -153,6 +153,18 @@ export const YAW_CLA_FLOOR = 0.4;
 export const YAW_CDA_GAIN = 1.5;
 
 /**
+ * Low-pass on ride heights before the floor curve sees them.
+ *
+ * Suspension ride height includes roll and pitch at wheelbase rates the venturi
+ * cannot follow — treating those as instantaneous stall/reattach targets pumps
+ * downforce balance in medium-speed corners. The floor still responds through
+ * `lagFloor`; this keeps the *target* from chattering.
+ */
+export const RIDE_AERO_TAU = 0.035;
+/** Lateral acceleration above which ride heights are low-passed for the floor curve. */
+export const CORNER_AERO_AY = 0.35 * G;
+
+/**
  * Body side force, and where it acts.
  *
  * The centre of pressure sits behind the CoG, which makes the bodywork a
@@ -218,6 +230,9 @@ export const optimumRideHeight = front => (front ? H_OPT_FRONT : H_OPT_REAR);
 export function createAeroState() {
   return {
     q: 0,
+    /** Low-passed ride heights fed to the floor curve, m. */
+    rideFilterFront: 0,
+    rideFilterRear: 0,
     /** Lagged floor effectiveness, 0..1. The state that makes porpoising possible. */
     floorLagFront: 1, floorLagRear: 1,
     claFront: 0, claRear: 0, claTotal: 0,
@@ -245,6 +260,20 @@ export function createAeroState() {
  *   `drs` boolean;
  *   `activeAero` boolean (2026).
  */
+/** Advance the ride-height low-pass. Exported for tests. */
+export function filterRideHeights(out, hF, hR, dt) {
+  if (!(dt > 0)) {
+    out.rideFilterFront = hF;
+    out.rideFilterRear = hR;
+    return;
+  }
+  const blend = Math.min(1, dt / RIDE_AERO_TAU);
+  if (!(out.rideFilterFront > 0)) out.rideFilterFront = hF;
+  if (!(out.rideFilterRear > 0)) out.rideFilterRear = hR;
+  out.rideFilterFront += (hF - out.rideFilterFront) * blend;
+  out.rideFilterRear += (hR - out.rideFilterRear) * blend;
+}
+
 export function groundEffect(out, c) {
   const speed = Math.abs(c.speed) || 0;
   const q = 0.5 * RHO * speed * speed;
@@ -252,13 +281,18 @@ export function groundEffect(out, c) {
 
   const hF = c.rideFront;
   const hR = c.rideRear;
-  out.stalledFront = hF < H_OPT_FRONT;
-  out.stalledRear = hR < H_OPT_REAR;
+  const dt = c.dt || 0;
+  const cornering = Math.abs(c.ay || 0) >= CORNER_AERO_AY;
+  if (cornering) filterRideHeights(out, hF, hR, dt);
+  else { out.rideFilterFront = hF; out.rideFilterRear = hR; }
+  const aeroF = out.rideFilterFront;
+  const aeroR = out.rideFilterRear;
+  out.stalledFront = aeroF < H_OPT_FRONT;
+  out.stalledRear = aeroR < H_OPT_REAR;
 
   // Target floor effectiveness, then the lagged value the car actually gets.
-  const targetF = floorFactor(hF, H_OPT_FRONT, H_STALL_FRONT);
-  const targetR = floorFactor(hR, H_OPT_REAR, H_STALL_REAR);
-  const dt = c.dt || 0;
+  const targetF = floorFactor(aeroF, H_OPT_FRONT, H_STALL_FRONT);
+  const targetR = floorFactor(aeroR, H_OPT_REAR, H_STALL_REAR);
   out.floorLagFront = lagFloor(out.floorLagFront, targetF, speed, dt);
   out.floorLagRear = lagFloor(out.floorLagRear, targetR, speed, dt);
 

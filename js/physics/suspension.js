@@ -79,15 +79,16 @@ export const K_SPRING_REAR = 200000;
 /**
  * Damping, N·s/m, split bump/rebound. Rebound is stiffer than bump — the standard
  * arrangement, and what stops the car pattering after a kerb instead of settling.
- * Digressive: the rate falls at high shaft speed so that a sharp input passes
- * through the damper rather than being fought by it, which is why a kerb does not
- * throw the car.
+ * Bump is digressive: the rate falls at high shaft speed so a sharp input passes
+ * through rather than being fought, which is why a kerb does not throw the car.
+ * Rebound stays linear — digressing the unload after that same kerb left the
+ * platform ringing for seconds once the car was back on asphalt.
  */
 export const C_BUMP_FRONT = 4600;
 export const C_REBOUND_FRONT = 8500;
 export const C_BUMP_REAR = 3800;
 export const C_REBOUND_REAR = 7000;
-/** Shaft speed at which the digressive knee sits, m/s. */
+/** Shaft speed at which the bump digressive knee sits, m/s. */
 export const DIGRESSIVE_KNEE = 0.08;
 export const DIGRESSIVE_SLOPE = 0.35;
 
@@ -136,6 +137,76 @@ export const K_BUMP_STOP = 2.4e6;
 export const DROOP_TRAVEL_FRONT = 0.030;
 export const DROOP_TRAVEL_REAR = 0.035;
 export const K_DROOP_STOP = 1.8e6;
+
+/**
+ * Fastest the contact patch height may rise or fall, m/s.
+ *
+ * A discrete sample that teleports the ground by half a metre in one step is
+ * not a surface — it is a rocket under the tyre. Real kerb ramps at race
+ * speed are a few m/s of vertical; this cap is above that and far below the
+ * teleport that used to throw the car into the sky.
+ */
+export const MAX_GROUND_RATE = 8;
+
+/**
+ * One-sided pull on an airborne wheel toward the road, N/m. Deviation coordinates
+ * cancel gravity at equilibrium, but a wheel 200 mm above the surface has no
+ * equilibrium — without this it hovers while the chassis pitches nose-up on the
+ * loaded axle.
+ */
+export const K_WHEEL_CONTACT = 650000;
+export const C_WHEEL_CONTACT = 18000;
+
+/**
+ * When the front axle is light, pull pitch toward the road plane and damp the
+ * rate. A real car cannot hold 3° of nose-up with both front tyres in the air.
+ */
+export const K_PITCH_ROAD = 160000;
+export const C_PITCH_AIR = 4500;
+/** Minimum hover before the contact spring engages — roll unload stays in-band. */
+export const WHEEL_HOVER_GAP = 0.03;
+/** Both front corners must be near airborne, not just one in a roll. */
+export const FRONT_AIRBORNE_FZ = 250;
+/**
+ * Crest/airborne recovery only on straights. Past this lateral load, roll legitimately
+ * extends the inside wheel and the contact spring would fight the roll moment.
+ */
+export const STRAIGHT_LATERAL_G = 0.35;
+/** Low-pass on the road pitch target — raw plane-fit grade jitters every step. */
+export const PITCH_GRADE_TAU = 0.07;
+/**
+ * Low-pass on the inertial pitch/roll drive. Tyre relaxation sends ay through at
+ * hundreds of hertz; feeding that straight into the roll moment excites the body
+ * at a frequency the chassis camera and the mesh then show as a shake in every
+ * medium-speed corner.
+ */
+export const INERTIAL_TAU = 0.065;
+
+/**
+ * Chassis heave limits relative to the (rate-limited) ground plane, m, and the
+ * vertical speed cap, m/s. Deviation coordinates cancel gravity at equilibrium,
+ * so once a kerb has thrown the sprung mass upward nothing in the force law
+ * brings it back on a short horizon — without these the car boings through a
+ * metre of imaginary suspension travel after rejoining from the grass.
+ */
+export const MAX_HEAVE = 0.12;
+/**
+ * Vertical speed cap on the sprung mass, m/s.
+ *
+ * This has to clear the speed the *road itself* descends at, or the car cannot
+ * follow its own circuit. At 1.0 m/s it did not: the steepest gradient here is
+ * 2.67% (s = 429 m, into Village), which at 45 m/s falls at 1.20 m/s and at the
+ * car's 90 m/s top speed falls at 2.40 m/s. The chassis was rate-limited to
+ * 1.0 m/s, fell behind the road by 0.2 m/s every step, ran the heave into
+ * `MAX_HEAVE`, and was then dragged off the ground — three corners unloaded to
+ * zero and the platform came down on the rebound stops. Peak front ride height
+ * over that one crest was 185 mm against a 30 mm static, and it read as the car
+ * bouncing itself airborne on a straight.
+ *
+ * So: above 2.40 m/s by a margin for kerbs and crests, and still far below the
+ * `MAX_GROUND_RATE` the surface itself is allowed to move at.
+ */
+export const MAX_HEAVE_SPEED = 4.0;
 
 /** Static ride heights, m — floor to ground, with rake. */
 export const RIDE_HEIGHT_FRONT = 0.030;
@@ -219,28 +290,29 @@ export const FZ_STATIC = [
 // ---------------------------------------------------------------------------
 
 /**
- * Damper force at a given shaft speed, N. Digressive and asymmetric.
+ * Damper force at a given shaft speed, N. Asymmetric: digressive in bump,
+ * linear in rebound.
  *
  * @param {number} rate shaft speed, m/s. Positive = compressing.
  */
 export function damperForce(rate, i) {
   const bump = IS_FRONT[i] ? C_BUMP_FRONT : C_BUMP_REAR;
   const rebound = IS_FRONT[i] ? C_REBOUND_FRONT : C_REBOUND_REAR;
-  const c = rate > 0 ? bump : rebound;
-  const v = Math.abs(rate);
+  if (rate <= 0) return rate * rebound;
+  const v = rate;
   // Linear to the knee, then a shallower slope, so a kerb is not fought.
   const effective = v <= DIGRESSIVE_KNEE
     ? v
     : DIGRESSIVE_KNEE + (v - DIGRESSIVE_KNEE) * DIGRESSIVE_SLOPE;
-  return Math.sign(rate) * c * effective;
+  return bump * effective;
 }
 
 /** Effective damping rate at a shaft speed — the Jacobian entry, N·s/m. */
 export function damperRate(rate, i) {
   const bump = IS_FRONT[i] ? C_BUMP_FRONT : C_BUMP_REAR;
   const rebound = IS_FRONT[i] ? C_REBOUND_FRONT : C_REBOUND_REAR;
-  const c = rate > 0 ? bump : rebound;
-  return Math.abs(rate) <= DIGRESSIVE_KNEE ? c : c * DIGRESSIVE_SLOPE;
+  if (rate <= 0) return rebound;
+  return Math.abs(rate) <= DIGRESSIVE_KNEE ? bump : bump * DIGRESSIVE_SLOPE;
 }
 
 /**
@@ -326,6 +398,8 @@ export function createSuspensionState(tune = DEFAULT_TUNE) {
     // Velocities.
     vc: 0, vPitch: 0, vRoll: 0,
     vw: [0, 0, 0, 0],
+    /** Last ground heights, for rate-limiting teleports. */
+    prevGround: [0, 0, 0, 0],
     /** Outputs. */
     fz: [FZ_STATIC[0], FZ_STATIC[1], FZ_STATIC[2], FZ_STATIC[3]],
     compression: [0, 0, 0, 0],
@@ -333,6 +407,11 @@ export function createSuspensionState(tune = DEFAULT_TUNE) {
     rideRear: tune.rideHeightRear ?? RIDE_HEIGHT_REAR,
     /** True while any corner is on its bump stop — the car is riding the packers. */
     onBumpStop: false,
+    /** Filtered road pitch for crest recovery — not the raw per-step plane fit. */
+    pitchRoadGrade: 0,
+    /** Filtered ax/ay for the inertial pitch and roll moments. */
+    axInertial: 0,
+    ayInertial: 0,
     /** True while the body attitude is against the small-angle limit. */
     attitudeLimited: false,
     /** Scratch, so the solve allocates nothing. */
@@ -348,6 +427,7 @@ export function resetSuspension(s) {
   for (let i = 0; i < 4; i++) {
     s.zw[i] = 0;
     s.vw[i] = 0;
+    s.prevGround[i] = 0;
     s.fz[i] = FZ_STATIC[i];
     s.compression[i] = 0;
   }
@@ -355,6 +435,9 @@ export function resetSuspension(s) {
   s.rideRear = s.rideHeightRear;
   s.onBumpStop = false;
   s.attitudeLimited = false;
+  s.pitchRoadGrade = 0;
+  s.axInertial = 0;
+  s.ayInertial = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -368,11 +451,25 @@ export function resetSuspension(s) {
  * @param {object} load external inputs, all deltas from static:
  *   `aeroFront`, `aeroRear` downforce in N (positive presses the car down);
  *   `ax`, `ay` chassis acceleration in m/s² for the inertial moments;
+ *   `gradeLong` road slope under the car, rad-ish dh/dx for attitude recovery;
  *   `ground` four ground displacements in m, positive up.
  * @param {number} dt seconds.
  */
 export function step(s, load, dt) {
-  const { aeroFront = 0, aeroRear = 0, ax = 0, ay = 0, ground } = load;
+  const { aeroFront = 0, aeroRear = 0, ax = 0, ay = 0, gradeLong = 0, ground } = load;
+  const onStraight = Math.abs(ay) < STRAIGHT_LATERAL_G * G;
+
+  // Rate-limit ground teleports before they become spring energy. A kerb ramp
+  // at speed is a few m/s vertical; an instant 0.5 m step is not.
+  const g = s._ground ?? (s._ground = [0, 0, 0, 0]);
+  const maxDelta = MAX_GROUND_RATE * Math.max(dt, 1e-6);
+  for (let i = 0; i < 4; i++) {
+    const target = ground ? ground[i] : 0;
+    const prev = s.prevGround[i];
+    const next = Math.max(prev - maxDelta, Math.min(prev + maxDelta, target));
+    g[i] = next;
+    s.prevGround[i] = next;
+  }
 
   // ---- assemble the generalised forces at the current state ----------------
   const f = s._f;
@@ -390,8 +487,13 @@ export function step(s, load, dt) {
   // the nose-up convention that is `+m·ax·h` about the pitch axis, which is the
   // opposite sign to the one this line had at first: the car rose at the front
   // under 5 g of braking and squatted at the rear.
-  f[1] += SPRUNG_MASS * ax * H_CG;
-  f[2] -= SPRUNG_MASS * ay * H_ROLL;
+  //
+  // Raw ay carries tyre-relaxation chatter; low-pass before it drives roll.
+  const inertialBlend = Math.min(1, dt / INERTIAL_TAU);
+  s.axInertial += (ax - s.axInertial) * inertialBlend;
+  s.ayInertial += (ay - s.ayInertial) * inertialBlend;
+  f[1] += SPRUNG_MASS * s.axInertial * H_CG;
+  f[2] -= SPRUNG_MASS * s.ayInertial * H_ROLL;
 
   const axleFront = 0.5 * (s.compression[0] + s.compression[1]);
   const axleRear = 0.5 * (s.compression[2] + s.compression[3]);
@@ -418,13 +520,52 @@ export function step(s, load, dt) {
     // Tyre. Deflection is the static amount, plus the road coming up, less the
     // wheel rising. One-sided: an airborne wheel carries nothing.
     const staticDeflection = FZ_STATIC[i] / TYRE_K;
-    const g = ground ? ground[i] : 0;
-    const deflection = staticDeflection + g - s.zw[i];
+    const deflection = staticDeflection + g[i] - s.zw[i];
     const ft = tyreVerticalForce(deflection, -s.vw[i]);
     s.fz[i] = ft;
+
+    // One-sided contact: a wheel above the road falls back toward it. Without
+    // this, crests and compressions leave the front hanging 200 mm in the air
+    // while the rear still loads and pitches the nose up.
+    const hover = s.zw[i] - (g[i] + staticDeflection);
+    // Roll unload legitimately hovers a wheel 80–100 mm; only pull down on straights.
+    if (hover > WHEEL_HOVER_GAP && onStraight) {
+      f[3 + i] -= K_WHEEL_CONTACT * hover + C_WHEEL_CONTACT * s.vw[i];
+    }
+
     // Reported as a load; as a force on the wheel it is the *change* from static,
     // because gravity is already balanced in these coordinates.
     f[3 + i] += ft - FZ_STATIC[i];
+
+    // Sprung weight lives on the chassis. At equilibrium the tyre cancels it
+    // through this corner; when the tyre unloads, that cancellation vanishes and
+    // the chassis must feel the missing weight — otherwise a kerb slap leaves the
+    // sprung mass weightless with upward velocity, and zc runs away to metres.
+    const unsprungWeight = UNSPRUNG_MASS * G;
+    const sprungShare = FZ_STATIC[i] - unsprungWeight;
+    const tyreForSprung = Math.max(0, ft - unsprungWeight);
+    const missingSprung = Math.max(0, sprungShare - tyreForSprung);
+    if (missingSprung > 0) {
+      f[0] -= missingSprung;
+      f[1] -= missingSprung * ax_i;
+      f[2] -= missingSprung * ay_i;
+      // Move the sprung portion of the weight off the wheel: airborne, the wheel
+      // only carries its own unsprung mass.
+      f[3 + i] += missingSprung;
+    }
+  }
+
+  let bothFrontsHover = true;
+  for (let i = 0; i < 2; i++) {
+    const staticDeflection = FZ_STATIC[i] / TYRE_K;
+    if (s.zw[i] - (g[i] + staticDeflection) <= WHEEL_HOVER_GAP) bothFrontsHover = false;
+  }
+  const bothFrontsLight = s.fz[0] < FRONT_AIRBORNE_FZ && s.fz[1] < FRONT_AIRBORNE_FZ;
+  const pitchRecover = onStraight && (bothFrontsHover || bothFrontsLight);
+  const gradeBlend = Math.min(1, dt / PITCH_GRADE_TAU);
+  s.pitchRoadGrade += (Math.atan(gradeLong) - s.pitchRoadGrade) * gradeBlend;
+  if (pitchRecover) {
+    f[1] += K_PITCH_ROAD * (s.pitchRoadGrade - s.pitch) - C_PITCH_AIR * s.vPitch;
   }
 
   // ---- assemble (M − dt·C + dt²·K) ----------------------------------------
@@ -479,6 +620,15 @@ export function step(s, load, dt) {
   s.roll += dt * s.vRoll;
   for (let i = 0; i < 4; i++) s.zw[i] += dt * s.vw[i];
 
+  // Keep heave inside real suspension travel. The force law alone cannot: a
+  // kerb impulse plus cancelled gravity leaves the chassis with upward speed
+  // and nowhere for the energy to go except "up forever, then droop-stop yank".
+  const gMean = 0.25 * (g[0] + g[1] + g[2] + g[3]);
+  if (s.vc > MAX_HEAVE_SPEED) s.vc = MAX_HEAVE_SPEED;
+  if (s.vc < -MAX_HEAVE_SPEED) s.vc = -MAX_HEAVE_SPEED;
+  if (s.zc > gMean + MAX_HEAVE) { s.zc = gMean + MAX_HEAVE; if (s.vc > 0) s.vc = 0; }
+  if (s.zc < gMean - MAX_HEAVE) { s.zc = gMean - MAX_HEAVE; if (s.vc < 0) s.vc = 0; }
+
   // Keep the body inside the range the linearised geometry is valid over. The
   // rate is zeroed as well as the angle, or the state stays hard against the stop
   // with a velocity that resumes the divergence the moment the load eases.
@@ -496,8 +646,8 @@ export function step(s, load, dt) {
 
   // ---- outputs -----------------------------------------------------------
   // Ride height is the floor, which follows the chassis, over the road.
-  const gF = ground ? 0.5 * (ground[0] + ground[1]) : 0;
-  const gR = ground ? 0.5 * (ground[2] + ground[3]) : 0;
+  const gF = 0.5 * (g[0] + g[1]);
+  const gR = 0.5 * (g[2] + g[3]);
   s.rideFront = s.rideHeightFront + (s.zc + LF * s.pitch) - gF;
   s.rideRear = s.rideHeightRear + (s.zc - LR * s.pitch) - gR;
 

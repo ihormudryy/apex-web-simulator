@@ -3,6 +3,8 @@
  * Pure geometry — no Three.js — so physics/tests can reuse the same rules.
  */
 
+import { blendStation } from './centerline.js';
+
 export function hash01(a, b, c, seed = 1) {
   let n = Math.imul(a + seed * 17, 374761393) + Math.imul(b + seed * 31, 668265263);
   n += Math.imul(c + seed * 53, 1442695041);
@@ -18,7 +20,8 @@ export function planGrassTufts(samples, lapLength, {
   alongSpacing = 1.2,
   // Tufts must clear the kerb before they start, or they grow out of the red and
   // white blocks. The kerb ribbon runs from `halfWidth` to `halfWidth + 1.0`.
-  edgeInset = 1.25,
+  // Extra margin covers the tuft card half-width so blades do not lean onto asphalt.
+  edgeInset = 1.45,
   maxBeyondRunoff = 1.5,
   // Tufts per station per side, before the density filter thins them.
   perStation = 6,
@@ -31,8 +34,11 @@ export function planGrassTufts(samples, lapLength, {
   const stationStep = Math.max(1, Math.round(alongSpacing / metresPerSample));
   const alongSpan = stationStep * metresPerSample;
   const placements = [];
+  const n = samples.length;
+  // How far along the ring to search when re-checking a jittered position.
+  const recheckWindow = Math.max(4, stationStep * 2);
 
-  for (let i = 0; i < samples.length; i += stationStep) {
+  for (let i = 0; i < n; i += stationStep) {
     const s = samples[i];
     // The plantable band: just outside the kerb, out to a little past the runoff.
     const inner = s.halfWidth + edgeInset;
@@ -56,15 +62,42 @@ export function planGrassTufts(samples, lapLength, {
         // Jitter along the lap as well as across it. Without this every tuft
         // sits exactly on a station and the verge shows transverse stripes.
         const along = (hash01(i, side, j + 5, seed) - 0.5) * alongSpan;
+        const x = s.x + s.nx * side * lateral + s.tx * along;
+        const z = s.z + s.nz * side * lateral + s.tz * along;
+
+        // Re-measure against the road at the jittered point. In a tightening
+        // corner, "outside the kerb" at station i is on the asphalt a metre later.
+        let bestI = i;
+        let bestD2 = Infinity;
+        for (let d = -recheckWindow; d <= recheckWindow; d++) {
+          const k = (i + d + n) % n;
+          const p = samples[k];
+          const d2 = (p.x - x) ** 2 + (p.z - z) ** 2;
+          if (d2 < bestD2) { bestD2 = d2; bestI = k; }
+        }
+        const at = samples[bestI];
+        const rx = x - at.x;
+        const rz = z - at.z;
+        const worldLateral = Math.abs(-(rx * at.nx + rz * at.nz));
+        // Width where the tuft actually is, not at the station it is nearest to.
+        // `centerline.query` interpolates between stations, so measuring against
+        // the raw station value let tufts through that the road then counted as
+        // being on the asphalt.
+        const pastStation = rx * at.tx + rz * at.tz;
+        const nb = samples[(bestI + (pastStation >= 0 ? 1 : -1) + n) % n];
+        const hw = blendStation(at.halfWidth, nb.halfWidth, pastStation, metresPerSample);
+        const ro = blendStation(at.runoff, nb.runoff, pastStation, metresPerSample);
+        if (worldLateral < hw + edgeInset) continue;
+        if (worldLateral > hw + ro + maxBeyondRunoff) continue;
 
         placements.push({
-          x: s.x + s.nx * side * lateral + s.tx * along,
-          z: s.z + s.nz * side * lateral + s.tz * along,
+          x,
+          z,
           yaw: Math.atan2(s.tx, s.tz) + (hash01(i, side, j + 2, seed) - 0.5) * 2.4,
           scale: 0.7 + hash01(i, side, j + 3, seed) * 0.5,
-          lateral,
-          halfWidth: s.halfWidth,
-          runoff: s.runoff,
+          lateral: worldLateral,
+          halfWidth: hw,
+          runoff: ro,
         });
         if (placements.length >= maxCount) return placements;
       }

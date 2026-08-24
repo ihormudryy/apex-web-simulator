@@ -27,6 +27,7 @@ import {
   createCar, step as kernelStep, resetCar, setSpawn, warmUp,
   launch as kernelLaunch, rebaseToGround,
 } from './kernel.js';
+import { applyGripScale, physicsPreset } from './physicsMode.js';
 import { createClock, resetClock, pump, DT, lerp } from './fixedStep.js';
 import { packInput, recordStep } from './replay.js';
 import { resolveWallContact, createContact } from './collision.js';
@@ -34,6 +35,7 @@ import { applyImpact, applyScrape, totalDamage } from './damage.js';
 import {
   createDriverState, resetDriver, tractionThrottle, brakeModulation,
   createSteerState, steerRamp, maxSteerAt, drsAllowed, MAX_STEER_DEG,
+  KEYBOARD_STEER_PEAK,
 } from './driver.js';
 import * as ST from './state.js';
 import { WHEEL_RADIUS } from './wheel.js';
@@ -46,9 +48,14 @@ export { maxSteerAt, MAX_STEER_DEG } from './driver.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-export function createVehicle({ x = 0, z = 0, yaw = 0, warm = true, setup = null } = {}) {
+export function createVehicle({
+  x = 0, z = 0, yaw = 0, warm, setup = null, physicsMode = 'arcade',
+} = {}) {
+  const preset = physicsPreset(physicsMode);
   const car = createCar({ x, z, yaw, setup });
-  if (warm) warmUp(car);
+  applyGripScale(car.tune, preset.id);
+  const startWarm = warm ?? preset.warm;
+  if (startWarm) warmUp(car);
   const v = {
     /** The kernel's car, including its flat state vector at `car.S`. */
     car,
@@ -74,13 +81,18 @@ export function createVehicle({ x = 0, z = 0, yaw = 0, warm = true, setup = null
 
     clock: createClock(),
     /** Pose one sim step back, for render interpolation. */
-    prev: { x, z, yaw },
+    prev: {
+      x: 0, z: 0, yaw: 0,
+      zc: 0, pitch: 0, roll: 0, groundHeight: 0, av: 0,
+    },
     pedals: { throttle: 0, brake: false },
 
     driver: createDriverState(),
     steering: createSteerState(),
-    /** Whether the driver model modulates the pedals. Off for a wheel and pedals. */
-    aids: true,
+    /** Whether the driver model modulates the pedals. Off for sim mode. */
+    aids: preset.aids,
+    physicsMode: preset.id,
+    warmOnReset: preset.warmOnReset,
 
     /** The latest wall contact, for effects, audio and the HUD. */
     contact: createContact(),
@@ -114,7 +126,7 @@ export function setPose(v, x, z, yaw, track = null) {
 export function resetVehicle(v, track = null) {
   resetCar(v.car);
   if (track) rebaseToGround(v.car, track);
-  warmUp(v.car);
+  if (v.warmOnReset) warmUp(v.car);
   resetDriver(v.driver);
   v.steering.smooth = 0;
   v.steering.angle = 0;
@@ -125,6 +137,12 @@ export function resetVehicle(v, track = null) {
   v.prev.x = v.spawn.x;
   v.prev.z = v.spawn.z;
   v.prev.yaw = v.spawn.yaw;
+  const susp = v.car.suspension;
+  v.prev.zc = susp.zc;
+  v.prev.pitch = susp.pitch;
+  v.prev.roll = susp.roll;
+  v.prev.groundHeight = v.car.out.groundHeight;
+  v.prev.av = 0;
   resetClock(v.clock);
   mirror(v);
 }
@@ -168,7 +186,8 @@ export function travelYaw(v) {
 }
 
 export function updateSteering(v, input, dt) {
-  steerRamp(v.steering, input.left, input.right, forwardSpeed(v), dt);
+  const peak = v.aids ? KEYBOARD_STEER_PEAK : 1;
+  steerRamp(v.steering, input.left, input.right, forwardSpeed(v), dt, peak);
   v.steerSmooth = v.steering.smooth;
   v.steerAngle = v.steering.angle;
 }
@@ -206,6 +225,9 @@ export function advance(v, input, track, dt) {
   v.wheelSpin = 0;
 
   const flags = v.recorder ? packInput(input) : 0;
+  // Snapshot at frame start so renderPose can blend the whole fixed-step batch,
+  // not just the last 1/600 s sub-step (which did nothing at exactly 60 Hz).
+  snapshotPose(v);
   pump(
     v.clock, dt,
     () => {
@@ -215,16 +237,21 @@ export function advance(v, input, track, dt) {
       simStep(v, throttle, brake, track, Boolean(input.drs));
       if (v.observer) v.observer(v);
     },
-    () => snapshotPose(v),
   );
   mirror(v);
 }
 
 function snapshotPose(v) {
   const S = v.car.S;
+  const susp = v.car.suspension;
   v.prev.x = S[ST.S_X];
   v.prev.z = S[ST.S_Z];
   v.prev.yaw = S[ST.S_YAW];
+  v.prev.zc = susp.zc;
+  v.prev.pitch = susp.pitch;
+  v.prev.roll = susp.roll;
+  v.prev.groundHeight = v.car.out.groundHeight;
+  v.prev.av = S[ST.S_AV];
 }
 
 /**
@@ -236,12 +263,23 @@ function snapshotPose(v) {
  * Yaw is blended linearly rather than by shortest arc on purpose: it accumulates
  * without wrapping, and one step of yaw is at most a few milliradians.
  */
-export function renderPose(v, out = { x: 0, z: 0, yaw: 0 }) {
-  const t = v.clock.alpha;
+export function renderPose(v, out = {
+  x: 0, z: 0, yaw: 0,
+  zc: 0, pitch: 0, roll: 0, groundHeight: 0, chassisY: 0, heave: 0, av: 0,
+}) {
+  const t = 1 - v.clock.alpha;
   const S = v.car.S;
+  const susp = v.car.suspension;
   out.x = lerp(v.prev.x, S[ST.S_X], t);
   out.z = lerp(v.prev.z, S[ST.S_Z], t);
   out.yaw = lerp(v.prev.yaw, S[ST.S_YAW], t);
+  out.zc = lerp(v.prev.zc, susp.zc, t);
+  out.pitch = lerp(v.prev.pitch, susp.pitch, t);
+  out.roll = lerp(v.prev.roll, susp.roll, t);
+  out.groundHeight = lerp(v.prev.groundHeight, v.car.out.groundHeight, t);
+  out.chassisY = v.car.datum + out.zc;
+  out.heave = out.zc - (out.groundHeight - v.car.datum);
+  out.av = lerp(v.prev.av, S[ST.S_AV], t);
   return out;
 }
 

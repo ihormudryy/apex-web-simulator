@@ -159,7 +159,7 @@ test('roughness varies round the lap, and Village is the rough bit', () => {
 test('a kerb is real geometry with a real height', () => {
   const hw = 10;
   assert.equal(kerbHeight(hw - 0.1, hw, 0), 0, 'nothing on the asphalt');
-  assert.ok(kerbHeight(hw + 0.5, hw, 0) >= KERB_HEIGHT * 0.95, 'full height in the middle');
+  assert.ok(kerbHeight(hw + 0.35, hw, 0) >= KERB_HEIGHT * 0.95, 'full height on the plateau');
   assert.equal(kerbHeight(hw + KERB_WIDTH + 0.1, hw, 0), 0, 'nothing past the far edge');
 });
 
@@ -173,6 +173,19 @@ test('a kerb ramps in rather than being a wall', () => {
   const hw = 10;
   const edge = kerbHeight(hw + 0.02, hw, 0);
   assert.ok(edge > 0 && edge < KERB_HEIGHT * 0.5, `${edge * 1000} mm at the leading edge`);
+});
+
+test('the runoff-side kerb ramp is gentler than the racing-line edge', () => {
+  // Rejoining from the grass climbs the outer ramp. A short outer ramp dumps a
+  // 50 mm step into digressive dampers and the car boings for seconds after it
+  // is back on asphalt.
+  const hw = 10;
+  const inner = kerbHeight(hw + 0.10, hw, 0);
+  const outer = kerbHeight(hw + KERB_WIDTH - 0.10, hw, 0);
+  assert.ok(
+    outer < inner * 0.55,
+    `outer ${ (outer * 1000).toFixed(1) } mm vs inner ${ (inner * 1000).toFixed(1) } mm at 10 cm from each edge`,
+  );
 });
 
 test('the serrations are what make a kerb loud', () => {

@@ -10,6 +10,9 @@
  * diff between two runs lines up column by column.
  */
 
+import { telemetryOf, forwardSpeed, lateralSpeed, speed } from './vehicle.js';
+import * as ST from './state.js';
+
 /**
  * The channel set. Anything a physics change might plausibly move, and nothing
  * that can be derived cheaply from the rest.
@@ -30,10 +33,11 @@ export const CHANNELS = [
   'tyreTFL', 'tyreTFR', 'tyreTRL', 'tyreTRR',
   'brakeTFL', 'brakeTFR', 'brakeTRL', 'brakeTRR',
   'rideF', 'rideR', 'downforce', 'drag', 'mz',
+  'trackT', 'trackLat', 'surface', 'y', 'pitch', 'roll', 'heave',
 ];
 
-/** One sample per sim step is 600 Hz; 20 s of that is plenty to look at. */
-export const DEFAULT_LOG_CAPACITY = 12000;
+/** ~60 s at 100 Hz after decimation. */
+export const DEFAULT_LOG_CAPACITY = 36000;
 /** Log every Nth sim step by default — 100 Hz is more than enough resolution. */
 export const DEFAULT_DECIMATION = 6;
 
@@ -145,4 +149,130 @@ export function diffLogs(a, b, { channels = CHANNELS } = {}) {
     });
   }
   return { samples: n, rows: rows.sort((p, q) => q.maxAbs - p.maxAbs) };
+}
+
+/** Surface codes for CSV — stable numeric labels rather than strings. */
+export const SURFACE_CODE = { tarmac: 0, kerb: 1, grass: 2 };
+
+/**
+ * One sim-step sample from the live vehicle. Free of three.js; the browser hooks
+ * this through `vehicle.observer` on the fixed step.
+ *
+ * @param {object} v vehicle from `createVehicle`
+ * @param {object} [track] optional circuit, for centreline position
+ */
+export function sampleVehicleLog(v, track = null) {
+  const S = v.car.S;
+  const sim = telemetryOf(v);
+  const q = track?.query ? track.query(v.x, v.z) : null;
+  const fwd = forwardSpeed(v);
+  const lat = lateralSpeed(v);
+  const sus = v.car.suspension;
+  return {
+    t: S[ST.S_TIME],
+    x: S[ST.S_X],
+    z: S[ST.S_Z],
+    yaw: S[ST.S_YAW],
+    y: sim.chassisY,
+    speed: speed(v),
+    vLong: fwd,
+    vLat: lat,
+    yawRate: S[ST.S_AV],
+    sideslip: Math.atan2(lat, Math.max(Math.abs(fwd), 0.5)),
+    aLong: S[ST.S_A_LONG],
+    aLat: S[ST.S_A_LAT],
+    throttle: v.pedals?.throttle ?? 0,
+    brake: v.pedals?.brake ? 1 : 0,
+    steer: v.steerAngle,
+    gear: S[ST.S_GEAR],
+    rpm: sim.rpm,
+    drs: S[ST.S_DRS] > 0.5 ? 1 : 0,
+    soc: S[ST.S_SOC],
+    fzFL: sim.fz[0],
+    fzFR: sim.fz[1],
+    fzRL: sim.fz[2],
+    fzRR: sim.fz[3],
+    slipFL: sim.slipAngle[0],
+    slipFR: sim.slipAngle[1],
+    slipRL: sim.slipAngle[2],
+    slipRR: sim.slipAngle[3],
+    kappaFL: sim.slipRatio[0],
+    kappaFR: sim.slipRatio[1],
+    kappaRL: sim.slipRatio[2],
+    kappaRR: sim.slipRatio[3],
+    tyreTFL: S[ST.S_TYRE_SURFACE_T],
+    tyreTFR: S[ST.S_TYRE_SURFACE_T + 1],
+    tyreTRL: S[ST.S_TYRE_SURFACE_T + 2],
+    tyreTRR: S[ST.S_TYRE_SURFACE_T + 3],
+    brakeTFL: S[ST.S_BRAKE_T],
+    brakeTFR: S[ST.S_BRAKE_T + 1],
+    brakeTRL: S[ST.S_BRAKE_T + 2],
+    brakeTRR: S[ST.S_BRAKE_T + 3],
+    rideF: sim.rideFront,
+    rideR: sim.rideRear,
+    downforce: sim.downforce,
+    drag: sim.drag,
+    mz: sim.steerTorque,
+    trackT: q?.t ?? 0,
+    trackLat: q?.lateral ?? 0,
+    surface: SURFACE_CODE[q?.surface] ?? -1,
+    pitch: sim.pitch,
+    roll: sim.roll,
+    heave: sim.heave,
+  };
+}
+
+/**
+ * Session recorder: toggle on Space, sample on the sim clock via `observer`.
+ */
+export function createTelemetryRecorder(options = {}) {
+  const log = createLog(options.capacity, options.decimation);
+  let active = false;
+  return {
+    log,
+    get active() { return active; },
+    start() {
+      resetLog(log);
+      active = true;
+    },
+    stop() {
+      active = false;
+      return logLength(log);
+    },
+    /** @returns {boolean} new active state */
+    toggle() {
+      if (active) {
+        active = false;
+        return false;
+      }
+      resetLog(log);
+      active = true;
+      return true;
+    },
+    observe(v, track) {
+      if (!active) return false;
+      return logStep(log, sampleVehicleLog(v, track));
+    },
+  };
+}
+
+/**
+ * Trigger a CSV download in the browser. No-op under Node.
+ *
+ * @param {ReturnType<typeof createLog>} log
+ * @param {string} [filename]
+ */
+export function downloadLogCSV(log, filename = 'telemetry.csv') {
+  if (typeof document === 'undefined') return;
+  const csv = toCSV(log);
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }

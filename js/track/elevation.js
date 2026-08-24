@@ -291,8 +291,16 @@ export const KERB_HEIGHT = 0.050;
 /** Serration pitch and depth, metres. */
 export const KERB_RIB_PITCH = 0.5;
 export const KERB_RIB_DEPTH = 0.012;
-/** How far the leading edge ramps up over, metres. Real kerbs are not a wall. */
+/**
+ * How far each kerb edge ramps up over, metres.
+ *
+ * The racing-line (inner) edge stays short so a kerb still bites. The runoff
+ * (outer) edge is longer: rejoining from the grass used to climb 50 mm in 18 cm,
+ * which is a damper shaft speed well past the digressive knee, and the car
+ * boinged for seconds after it was back on asphalt.
+ */
 export const KERB_RAMP = 0.18;
+export const KERB_RAMP_OUTER = 0.45;
 
 /**
  * Kerb height at a lateral offset, given the edge of the asphalt.
@@ -304,9 +312,9 @@ export const KERB_RAMP = 0.18;
 export function kerbHeight(lateralAbs, halfWidth, along) {
   const over = lateralAbs - halfWidth;
   if (over <= 0 || over > KERB_WIDTH) return 0;
-  // Ramp in, then flat, then fall away at the far edge back to the runoff.
+  // Ramp in from the asphalt, then fall away more gently toward the runoff.
   const rampIn = Math.min(1, over / KERB_RAMP);
-  const rampOut = Math.min(1, (KERB_WIDTH - over) / KERB_RAMP);
+  const rampOut = Math.min(1, (KERB_WIDTH - over) / KERB_RAMP_OUTER);
   const plateau = KERB_HEIGHT * Math.min(rampIn, rampOut);
   // Ribs run across the kerb, so they are a function of distance along the lap.
   const rib = KERB_RIB_DEPTH * 0.5
@@ -388,12 +396,76 @@ export function groundFieldHeight(q, lapLength, profile = {}, mean = null) {
 }
 
 /**
+ * Ground-mesh height that does not cliff where two parts of the lap pass nearby.
+ *
+ * `groundFieldHeight` is keyed on the single nearest station. Between Brooklands
+ * and Luffield — or inside the Loop — two ribbons sit tens of metres apart with
+ * several metres of elevation between them. An axis-aligned 20 m cell then
+ * straddles the Voronoi cut and the lawn is a rectangular pit, fence hanging
+ * over the hole. Inverse-distance blend of every station inside
+ * `GROUND_BLEND_R` turns that cut into a slope. On the asphalt the nearest
+ * station still dominates (d² ≈ 0).
+ *
+ * Physics keeps nearest-station `groundFieldHeight`; this is the drawn field.
+ */
+export const GROUND_BLEND_R = 90;
+
+export function blendedGroundHeight(samples, x, z, lapLength, profile = {}, mean = null) {
+  const flat = mean ?? meanElevation(profile.elevation ?? SILVERSTONE_ELEVATION);
+  const r2 = GROUND_BLEND_R * GROUND_BLEND_R;
+  let bestI = 0, bestD2 = Infinity;
+  let hsum = 0, wsum = 0;
+  const q = { t: 0, lateral: 0, halfWidth: 0, wallLimit: 0 };
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    const d2 = (s.x - x) * (s.x - x) + (s.z - z) * (s.z - z);
+    if (d2 < bestD2) { bestD2 = d2; bestI = i; }
+    if (d2 >= r2) continue;
+    q.t = s.t;
+    q.lateral = -((x - s.x) * s.nx + (z - s.z) * s.nz);
+    q.halfWidth = s.halfWidth;
+    q.wallLimit = s.halfWidth + s.runoff;
+    const w = 1 / (d2 + 16);
+    hsum += w * groundFieldHeight(q, lapLength, profile, flat);
+    wsum += w;
+  }
+  if (wsum > 0) return hsum / wsum;
+  const s = samples[bestI];
+  q.t = s.t;
+  q.lateral = -((x - s.x) * s.nx + (z - s.z) * s.nz);
+  q.halfWidth = s.halfWidth;
+  q.wallLimit = s.halfWidth + s.runoff;
+  return groundFieldHeight(q, lapLength, profile, flat);
+}
+
+/**
  * Surface roughness at a point, 0..1 — for the tyre scrub audio, for the camera
  * shake, and for anything else that wants to know the road is bad without
  * measuring it.
  */
 export function surfaceRoughness(q, profile = {}) {
   return roughnessAt(q.t, profile.roughness ?? SILVERSTONE_ROUGHNESS);
+}
+
+/**
+ * Extra sink of the *world ground mesh* under the racing ribbons.
+ *
+ * The coarse horizon grid cannot cut a hole that follows the asphalt. A binary
+ * 15 cm drop under the road was a jagged cliff — black seams and z-fighting
+ * along the ribbon. Instead sink the lawn only where the ribbons already cover
+ * it, and fade to zero by the wall so the far field and the catch fence stay
+ * flush with `groundFieldHeight` (the physics height).
+ *
+ * Physics does not use this. The car stands on `groundFieldHeight + roadLiftAt`.
+ *
+ * Always zero. A lateral-keyed sink on an axis-aligned grid is a rectangular
+ * pit wherever a cell straddles the wall on a corner — the leftover holes.
+ * The ribbons sit above the lawn via `Y_ASPHALT` and polygonOffset.
+ */
+export const GROUND_MESH_SINK = 0;
+
+export function groundMeshBias(_lateralAbs, _wallLimit) {
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

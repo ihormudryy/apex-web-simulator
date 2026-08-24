@@ -49,10 +49,26 @@ test('tufts start outside the kerb, not on it', () => {
   // The kerb ribbon occupies halfWidth .. halfWidth + KERB_WIDTH (1.0 m). Tufts
   // planted at +0.35 m grew straight out of the red and white blocks.
   const cl = buildCenterline(SILVERSTONE_WAYPOINTS, 2000);
-  for (const t of planGrassTufts(cl.samples, cl.length)) {
-    assert.ok(t.lateral - t.halfWidth >= 1.25 - 1e-9,
+  const edgeInset = 2.25; // matches Track: KERB_WIDTH + 1.25
+  for (const t of planGrassTufts(cl.samples, cl.length, { edgeInset })) {
+    assert.ok(t.lateral - t.halfWidth >= edgeInset - 1e-9,
       `tuft only ${(t.lateral - t.halfWidth).toFixed(3)} m off the racing surface`);
   }
+});
+
+test('along-track jitter never drops a tuft onto the asphalt or kerb', () => {
+  // Placement used the station's halfWidth, then jittered along the tangent.
+  // In a tightening corner that put tufts on the racing surface — the green
+  // clumps growing out of the tarmac in the chase cam.
+  const cl = buildCenterline(SILVERSTONE_WAYPOINTS, 4000);
+  const edgeInset = 2.25;
+  const tufts = planGrassTufts(cl.samples, cl.length, { edgeInset, maxCount: 60000 });
+  let onTrack = 0;
+  for (const t of tufts) {
+    const q = cl.query(t.x, t.z);
+    if (Math.abs(q.lateral) < q.halfWidth + edgeInset) onTrack++;
+  }
+  assert.equal(onTrack, 0, `${onTrack} tufts landed on asphalt/kerb after jitter`);
 });
 
 test('the kerb inset is caller-supplied so Track owns KERB_WIDTH', () => {

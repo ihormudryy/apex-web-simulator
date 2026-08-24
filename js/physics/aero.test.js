@@ -4,9 +4,9 @@ import {
   CLA_WING_FRONT, CLA_FLOOR_FRONT, CLA_WING_REAR, CLA_FLOOR_REAR,
   H_OPT_FRONT, H_OPT_REAR, H_STALL_FRONT, H_STALL_REAR, VENTURI_EXPONENT,
   CDA_BODY, CDA_REAR_WING, CDA_REAR_WING_DRS, CDA_INDUCED_K, DRS_CLA_LOSS,
-  YAW_CLA_LOSS, YAW_CLA_FLOOR, YAW_CDA_GAIN,
+  YAW_CLA_LOSS, YAW_CLA_FLOOR, YAW_CDA_GAIN, RIDE_AERO_TAU,
   CYA_BODY, X_CP, K_PLANK, PLANK_FRICTION,
-  AERO_LAG_LENGTH, REATTACH_LAG_FACTOR, lagFloor,
+  AERO_LAG_LENGTH, REATTACH_LAG_FACTOR, lagFloor, filterRideHeights,
   floorFactor, clAtRideHeight, optimumRideHeight,
   createAeroState, groundEffect, drs, dragArea, aeroPitchMoment,
 } from './aero.js';
@@ -359,16 +359,17 @@ test('omitting dt gives the steady-state coefficient', () => {
 // ---------------------------------------------------------------------------
 
 /** Run the coupled aero/suspension system and report the ride-height cycle. */
-function coupled(kmh, seconds = 8) {
+function coupled(kmh, seconds = 8, ay = 0) {
   const s = createSuspensionState();
   const a = createAeroState();
-  const load = { ground: FLAT, aeroFront: 0, aeroRear: 0 };
+  const load = { ground: FLAT, aeroFront: 0, aeroRear: 0, ay, ax: 0 };
   const cond = {
     speed: kmh / 3.6, rideFront: RIDE_HEIGHT_FRONT, rideRear: RIDE_HEIGHT_REAR,
-    sideslip: 0, yawRate: 0, drs: false, dt: DT,
+    sideslip: 0, yawRate: 0, drs: false, dt: DT, ay,
   };
   const n = Math.round(seconds / DT);
   const tail = [];
+  const dfTail = [];
   for (let i = 0; i < n; i++) {
     cond.rideFront = s.rideFront;
     cond.rideRear = s.rideRear;
@@ -376,19 +377,26 @@ function coupled(kmh, seconds = 8) {
     // The plank pushes up, so it is subtracted from the downward aero load.
     load.aeroFront = a.fzFront - a.plankFront;
     load.aeroRear = a.fzRear - a.plankRear;
+    load.ay = ay;
     suspStep(s, load, DT);
-    if (i > n - 1800) tail.push(s.rideFront);
+    if (i > n - 1800) {
+      tail.push(s.rideFront);
+      dfTail.push(a.downforce);
+    }
   }
   const mean = tail.reduce((p, q) => p + q, 0) / tail.length;
   let crossings = 0;
   for (let i = 1; i < tail.length; i++) {
     if ((tail[i - 1] - mean) * (tail[i] - mean) < 0) crossings++;
   }
+  const dfMean = dfTail.reduce((p, q) => p + q, 0) / dfTail.length;
+  const dfStd = Math.sqrt(dfTail.reduce((p, q) => p + (q - dfMean) ** 2, 0) / dfTail.length);
   return {
     amplitude: (Math.max(...tail) - Math.min(...tail)) * 1000,
     hz: crossings / 2 / (tail.length * DT),
     rideFront: mean * 1000,
     downforce: a.downforce / G,
+    dfStd,
   };
 }
 
@@ -407,6 +415,27 @@ test('PORPOISING EMERGES at high speed — the acid test for a coupled model', (
 test('and does NOT appear at low speed, where the floor is nowhere near stalling', () => {
   const slow = coupled(150);
   assert.ok(slow.amplitude < 1, `${slow.amplitude.toFixed(2)} mm of bouncing at 150 km/h`);
+});
+
+test('cornering at medium speed does not hunt downforce from roll-induced ride height', () => {
+  const corner = coupled(110, 8, 1.2 * G);
+  assert.ok(
+    corner.amplitude < 2,
+    `${corner.amplitude.toFixed(2)} mm ride bounce at 110 km/h with 1.2 g lateral`,
+  );
+  assert.ok(
+    corner.dfStd < 800,
+    `${(corner.dfStd / 1000).toFixed(2)} kN downforce std in cornering`,
+  );
+});
+
+test('ride heights are low-passed before the floor curve sees them', () => {
+  const a = createAeroState();
+  filterRideHeights(a, 0.020, 0.050, DT);
+  assert.ok(Math.abs(a.rideFilterFront - 0.020) < 1e-9);
+  filterRideHeights(a, 0.010, 0.050, DT);
+  assert.ok(a.rideFilterFront > 0.010 && a.rideFilterFront < 0.020);
+  assert.ok(RIDE_AERO_TAU > 0.02 && RIDE_AERO_TAU < 0.06);
 });
 
 test('the coupled car settles at a plausible ride height and downforce', () => {

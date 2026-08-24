@@ -82,11 +82,11 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 /**
  * Total brake torque at optimum pad μ, N·m. Sized for the reference stopping
- * distances: 14 kN·m over a 0.334 m radius is 42 kN of retarding force, which on
+ * distances: 15.5 kN·m over a 0.334 m radius is ~46 kN of retarding force, which on
  * 798 kg loaded by 2 tonnes of downforce is the 5–6 g the car should pull at
  * speed, and is friction-clipped back to a mechanical ~2 g when the aero is gone.
  */
-export const BRAKE_TORQUE_MAX = 14000;
+export const BRAKE_TORQUE_MAX = 15800;
 export const BRAKE_MU_REFERENCE = 0.62;
 export const BRAKE_BIAS_FRONT = 0.58;
 
@@ -214,10 +214,10 @@ export function createCar({ x = 0, z = 0, yaw = 0, shared = false, setup = null 
     _tyre: [tyreScratch(), tyreScratch(), tyreScratch(), tyreScratch()],
     _cond: {
       speed: 0, rideFront: RIDE_HEIGHT_FRONT, rideRear: RIDE_HEIGHT_REAR,
-      sideslip: 0, yawRate: 0, drs: false, dt: 0, activeAero: false,
+      sideslip: 0, yawRate: 0, ay: 0, drs: false, dt: 0, activeAero: false,
       claWingFront: 0, claWingRear: 0, cdaWings: 0,
     },
-    _load: { aeroFront: 0, aeroRear: 0, ax: 0, ay: 0, ground: [0, 0, 0, 0] },
+    _load: { aeroFront: 0, aeroRear: 0, ax: 0, ay: 0, gradeLong: 0, ground: [0, 0, 0, 0] },
     resets: 0,
     spawn: { x, z, yaw },
     /**
@@ -261,6 +261,8 @@ export function resetCar(car) {
   car.ers.mode = MODE_OFF;
   car.aero.floorLagFront = 1;
   car.aero.floorLagRear = 1;
+  car.aero.rideFilterFront = 0;
+  car.aero.rideFilterRear = 0;
   for (let i = 0; i < 4; i++) car.brakes.discT[i] = 80;
   car.out.rpm = IDLE_RPM;
   return car;
@@ -303,6 +305,9 @@ export function rebaseToGround(car, track) {
   sampleWheelSurfaces(track, car.S[S_.S_X], car.S[S_.S_Z], car.S[S_.S_YAW], car.surfaces);
   fitGroundPlane(car.surfaces, car.ground);
   car.datum = car.ground.height;
+  for (let i = 0; i < 4; i++) {
+    car.suspension.prevGround[i] = car.surfaces[i].height - car.datum;
+  }
   return car.datum;
 }
 
@@ -378,6 +383,7 @@ export function step(car, input, track, dt) {
   cond.rideRear = car.suspension.rideRear;
   cond.sideslip = sideslip;
   cond.yawRate = av;
+  cond.ay = S[S_.S_A_LAT];
   cond.drs = Boolean(input.drs);
   cond.dt = dt;
   // A broken front wing is missing downforce; a broken floor is missing floor
@@ -399,6 +405,7 @@ export function step(car, input, track, dt) {
   load.aeroRear = aero.fzRear - aero.plankRear;
   load.ax = S[S_.S_A_LONG];
   load.ay = S[S_.S_A_LAT];
+  load.gradeLong = ground.gradeLong;
   // Raw wheel heights, less the datum the car was placed at. The suspension's
   // heave, pitch and roll are free DOFs, so it settles onto any plane by itself
   // and the springs return to static — while a kerb, a crest and a compression

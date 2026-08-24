@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import {
   CHANNELS, createLog, logStep, logLength, logWrapped, logAt, channel,
   resetLog, toCSV, diffLogs, DEFAULT_DECIMATION,
+  createTelemetryRecorder, sampleVehicleLog, SURFACE_CODE,
 } from './telemetryLog.js';
+import { createVehicle, advance, updateSteering } from './vehicle.js';
+
+const FLAT = {
+  query: () => ({ surface: 'tarmac', lateral: 0, t: 0, halfWidth: 8, wallLimit: 50 }),
+};
 
 const sample = over => ({ t: 0, speed: 0, ...over });
 
@@ -105,4 +111,41 @@ test('diffing logs of different lengths compares the overlap', () => {
   for (let i = 0; i < 10; i++) logStep(a, sample({ t: i }));
   for (let i = 0; i < 4; i++) logStep(b, sample({ t: i }));
   assert.equal(diffLogs(a, b).samples, 4);
+});
+
+test('sampleVehicleLog fills every channel from a live vehicle', () => {
+  const v = createVehicle();
+  const row = sampleVehicleLog(v, FLAT);
+  for (const name of CHANNELS) {
+    assert.equal(typeof row[name], 'number', `missing ${name}`);
+  }
+  assert.equal(row.surface, SURFACE_CODE.tarmac);
+});
+
+test('telemetry recorder samples through observe while active', () => {
+  const rec = createTelemetryRecorder({ capacity: 32, decimation: 1 });
+  const v = createVehicle();
+  const input = { forward: true, reverse: false, left: false, right: false, brake: false };
+  rec.start();
+  for (let i = 0; i < 5; i++) {
+    updateSteering(v, input, 1 / 60);
+    advance(v, input, FLAT, 1 / 60);
+    rec.observe(v, FLAT);
+  }
+  assert.equal(logLength(rec.log), 5);
+  rec.stop();
+  assert.equal(rec.active, false);
+  rec.observe(v, FLAT);
+  assert.equal(logLength(rec.log), 5, 'must not grow while stopped');
+});
+
+test('toggle clears the log when starting a new session', () => {
+  const rec = createTelemetryRecorder({ capacity: 16, decimation: 1 });
+  const v = createVehicle();
+  assert.equal(rec.toggle(), true);
+  rec.observe(v, FLAT);
+  assert.equal(logLength(rec.log), 1);
+  assert.equal(rec.toggle(), false);
+  assert.equal(rec.toggle(), true);
+  assert.equal(logLength(rec.log), 0);
 });

@@ -141,7 +141,14 @@ export const STEER_LOCK_COEFF = 577;
 export const STEER_LOCK_EXPONENT = 1.25;
 export const STEER_LOCK_MARGIN = 1.3;
 
-export function steerRamp(state, left, right, vLong, dt) {
+/**
+ * Arcade keyboard shaping: full left/right does not map to full rack travel.
+ * Past the tyre's peak slip angle, more lock adds scrub without yaw — which on
+ * a keyboard reads as a damped, sliding buggy rather than a car on rails.
+ */
+export const KEYBOARD_STEER_PEAK = 0.85;
+
+export function steerRamp(state, left, right, vLong, dt, peak = 1) {
   const rate = STEER_RATE * dt;
   const target = (left ? -1 : 0) + (right ? 1 : 0);
   if (target === 0) {
@@ -154,7 +161,7 @@ export function steerRamp(state, left, right, vLong, dt) {
   }
   state.smooth = clamp(state.smooth, -1, 1);
   const maxSteer = maxSteerAt(Math.abs(vLong));
-  state.angle = -state.smooth * maxSteer;
+  state.angle = -state.smooth * maxSteer * clamp(peak, 0, 1);
   return state.angle;
 }
 
@@ -194,9 +201,13 @@ export const drsAllowed = (vLong, braking) => vLong > DRS_MIN_SPEED && !braking;
  * about 74% of peak force, so the car does stop — 26% slower, with no steering,
  * which is neither the reference figure nor anything a driver would do.
  */
-export const BRAKE_KI = 9.0;
-export const BRAKE_KP = 2.0;
-export const BRAKE_RELEASE = 4.0;
+export const BRAKE_KI = 2.5;
+export const BRAKE_KP = 0.8;
+export const BRAKE_RELEASE = 12.0;
+/** Slip ratio above which the aid starts trimming pedal — past peak, not at it. */
+export const BRAKE_LOCK_SLIP = 0.30;
+/** Never cut more than this — a keyboard is on/off, not a foot. */
+export const BRAKE_CUT_MAX = 0.18;
 /** Below this there is nothing left to modulate; just stop the car. */
 export const BRAKE_MODULATE_ABOVE = 3;
 
@@ -218,11 +229,11 @@ export function brakeModulation(d, S, demand, vLong, dt) {
   }
   d.brakeSlip = worst;
 
-  const excess = (worst - TARGET_SLIP) / TARGET_SLIP;
+  const excess = (worst - BRAKE_LOCK_SLIP) / BRAKE_LOCK_SLIP;
   if (excess > 0) {
-    d.brakeCut = clamp(d.brakeCut + BRAKE_KI * excess * dt, 0, 1);
+    d.brakeCut = clamp(d.brakeCut + BRAKE_KI * excess * dt, 0, BRAKE_CUT_MAX);
   } else {
-    d.brakeCut = clamp(d.brakeCut - BRAKE_RELEASE * dt, 0, 1);
+    d.brakeCut = 0;
   }
   const proportional = Math.max(0, excess) * BRAKE_KP;
   return demand * clamp(1 - d.brakeCut - proportional, 0, 1);

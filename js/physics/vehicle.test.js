@@ -2,12 +2,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createVehicle, advance, updateSteering, resolvePedals,
+  createVehicle, setPose, advance, updateSteering, resolvePedals, launchVehicle,
   forwardSpeed, lateralSpeed, travelYaw, speed, REVERSE_THRESHOLD, renderPose,
 } from './vehicle.js';
-import { WB } from './constants.js';
+import { WB, MU } from './constants.js';
 import { MAX_CATCHUP, DT as SIM_DT } from './fixedStep.js';
 import * as SIM from './state.js';
+import { buildCenterline } from '../track/centerline.js';
+import { SILVERSTONE_WAYPOINTS } from '../track/silverstoneWaypoints.js';
+import {
+  surfaceHeight, surfaceRoughness, verticalCurvature,
+} from '../track/elevation.js';
 
 const DT = 1 / 60;
 const flat = {
@@ -272,6 +277,17 @@ test('renderPose interpolates between the last two sim states', () => {
   const lo = Math.min(car.prev.z, car.z);
   const hi = Math.max(car.prev.z, car.z);
   assert.ok(pose.z >= lo && pose.z <= hi, `${pose.z} outside [${lo}, ${hi}]`);
+  const susp = car.car.suspension;
+  assert.ok(
+    pose.pitch >= Math.min(car.prev.pitch, susp.pitch) - 1e-12
+    && pose.pitch <= Math.max(car.prev.pitch, susp.pitch) + 1e-12,
+    'pitch must interpolate',
+  );
+  assert.ok(
+    pose.chassisY >= Math.min(car.car.datum + car.prev.zc, car.car.datum + susp.zc) - 1e-9
+    && pose.chassisY <= Math.max(car.car.datum + car.prev.zc, car.car.datum + susp.zc) + 1e-9,
+    'chassisY must interpolate',
+  );
   // And it must not be reading the raw state, which is what caused the stutter.
   assert.notEqual(car.prev.z, car.z, 'a frame at 60 fps must take several steps');
 });
@@ -279,6 +295,64 @@ test('renderPose interpolates between the last two sim states', () => {
 test('renderPose writes into a caller-supplied object, allocating nothing', () => {
   const car = launched(50);
   advance(car, keys({ forward: true }), flat, 1 / 60);
-  const out = { x: 0, z: 0, yaw: 0 };
+  const out = { x: 0, z: 0, yaw: 0, zc: 0, pitch: 0, roll: 0, groundHeight: 0, chassisY: 0, heave: 0, av: 0 };
   assert.equal(renderPose(car, out), out, 'must return the same object it was given');
+});
+
+test('renderPose keeps suspension attitude between consecutive sim samples', () => {
+  const car = launched(28);
+  advance(car, keys({ forward: true, left: true }), flat, 1 / 60);
+  const susp = car.car.suspension;
+  const span = Math.abs(susp.roll - car.prev.roll);
+  const pose = renderPose(car);
+  assert.ok(Math.abs(pose.roll - susp.roll) <= span + 1e-12, 'render roll must not overshoot the latest sample');
+  assert.ok(Math.abs(pose.roll - car.prev.roll) <= span + 1e-12, 'render roll must not overshoot the previous sample');
+  assert.ok(
+    Math.abs(pose.chassisY - (car.car.datum + susp.zc)) <= Math.abs(susp.zc - car.prev.zc) + 1e-9,
+    'render height must stay inside the last sim step',
+  );
+});
+
+test('elevated cornering keeps body roll smooth', () => {
+  const centerline = buildCenterline(SILVERSTONE_WAYPOINTS, 4000);
+  let hint = 0;
+  let wheelHint = 0;
+  const track = {
+    centerline,
+    query(x, z) {
+      const r = centerline.query(x, z, hint);
+      hint = r.index;
+      return r;
+    },
+    queryWheel(x, z, out) {
+      const q = centerline.query(x, z, wheelHint);
+      wheelHint = q.index;
+      out.surface = q.surface;
+      out.mu = MU[q.surface] ?? MU.grass;
+      out.height = surfaceHeight(q, centerline.length);
+      out.roughness = surfaceRoughness(q);
+      out.curvature = verticalCurvature(q.t, centerline.length);
+      out.nx = 0;
+      out.nz = 0;
+      return out;
+    },
+  };
+  const spawn = centerline.samples[Math.round(0.13 * centerline.samples.length)];
+  const car = createVehicle();
+  setPose(car, spawn.x, spawn.z, Math.atan2(-spawn.tx, -spawn.tz), track);
+  launchVehicle(car, 25);
+  const input = keys({ forward: true, left: true });
+  const roll = [];
+  car.observer = () => roll.push(car.car.suspension.roll);
+  for (let f = 0; f < 360; f++) {
+    updateSteering(car, input, DT);
+    advance(car, input, track, DT);
+  }
+  const tail = roll.slice(Math.floor(roll.length * 0.4));
+  const mean = tail.reduce((a, b) => a + b, 0) / tail.length;
+  const std = Math.sqrt(tail.reduce((a, b) => a + (b - mean) ** 2, 0) / tail.length);
+  assert.ok(
+    std * 180 / Math.PI < 1.05,
+    `Village hairpin roll chatter ${(std * 180 / Math.PI).toFixed(2)} deg`,
+  );
 });
