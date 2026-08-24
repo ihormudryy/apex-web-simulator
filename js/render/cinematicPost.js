@@ -38,7 +38,11 @@
 import {
   convertToTexture, uniform, vec2, vec3, vec4, float, int,
   length as tslLength, min as tslMin, max as tslMax,
+  clamp as tslClamp, mix as tslMix, dot as tslDot, renderOutput,
 } from 'three/tsl';
+import {
+  TOE_LIFT, TOE_RANGE, SHOULDER, SHOULDER_FROM, SATURATION, LUMA_WEIGHTS,
+} from './grading.js';
 import { motionBlur } from 'three/addons/tsl/display/MotionBlur.js';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { lensflare } from 'three/addons/tsl/display/LensflareNode.js';
@@ -69,6 +73,42 @@ const FLARE_TINT = [1.0, 0.86, 0.72];
  * pass is four samples of a small target.
  */
 const FLARE_DOWNSAMPLE = 2;
+
+/**
+ * `grading.js`'s tone curve, in TSL, from the same constants.
+ *
+ * Branch-free, and exactly equivalent: `max(0, 1 - v/TOE_RANGE)` is the
+ * `if (v < TOE_RANGE)` guard, because the term reaches zero precisely at the
+ * range and stays there. Same for the shoulder. TSL has no `if` over a varying,
+ * and a `select` here would cost more than the two multiplies it saved.
+ *
+ * @param {object} v a float node in display-referred 0..1
+ */
+function toneCurveNode(v) {
+  const x = tslClamp(v, 0, 1);
+  const toe = tslMax(float(0), float(1).sub(x.div(float(TOE_RANGE))));
+  const lifted = x.add(toe.mul(toe).mul(float(TOE_LIFT)));
+  const shoulder = tslMax(
+    float(0), lifted.sub(float(SHOULDER_FROM)).div(float(1 - SHOULDER_FROM)),
+  );
+  return tslClamp(lifted.sub(shoulder.mul(shoulder).mul(float(SHOULDER))), 0, 1);
+}
+
+/**
+ * The grade, applied to a display-referred vec4 — the WebGPU counterpart of
+ * `gradingPass.js`, which runs after `OutputPass` on the WebGL composer.
+ *
+ * Saturation is a `mix` past 1.0 on purpose: that extrapolates away from
+ * luminance, which is what `mix(vec3(luma), curved, 1.06)` does in the GLSL.
+ */
+function gradeNode(display) {
+  const curved = vec3(
+    toneCurveNode(display.r), toneCurveNode(display.g), toneCurveNode(display.b),
+  );
+  const luma = tslDot(curved, vec3(LUMA_WEIGHTS.r, LUMA_WEIGHTS.g, LUMA_WEIGHTS.b));
+  const saturated = tslMix(vec3(luma), curved, float(SATURATION));
+  return vec4(tslClamp(saturated, 0, 1), display.a);
+}
 
 /**
  * Runtime-tunable values, as uniform nodes. Shared across every pipeline that
@@ -154,7 +194,7 @@ export function buildCinematicOutput({ color, velocity, viewZ, uniforms, feature
     image = convertToTexture(motionBlur(image, capped, int(MOTION_BLUR_SAMPLES)));
   }
 
-  if (!features.bloom) return image;
+  if (!features.bloom) return gradeIfAsked(image, features);
 
   // Clamp what the bright-pass may see. See BLOOM_INPUT_CLAMP: the sun in the
   // shipped HDRI is four orders of magnitude brighter than the sky around it,
@@ -182,5 +222,20 @@ export function buildCinematicOutput({ color, velocity, viewZ, uniforms, feature
     rgb = rgb.add(flare.rgb.mul(uniforms.flareAmount));
   }
 
-  return vec4(rgb, image.a);
+  return gradeIfAsked(vec4(rgb, image.a), features);
+}
+
+/**
+ * The one exit every path takes, so grading cannot be skipped by whichever
+ * effect happened to return early.
+ *
+ * `renderOutput` is what makes this legal: it applies the renderer's tone
+ * mapping (with its exposure) and output colour space right here, so the grade
+ * that follows sees display-referred 0..1 — the same input the WebGL pass gets
+ * downstream of `OutputPass`. The caller must then clear
+ * `RenderPipeline.outputColorTransform`, or the frame is transformed twice;
+ * `attachCinematicTail` keeps the two in step.
+ */
+function gradeIfAsked(hdr, features) {
+  return features.grade ? gradeNode(renderOutput(hdr)) : hdr;
 }

@@ -96,9 +96,12 @@ test('mark intensity is bounded', () => {
 // ---------------------------------------------------------------------------
 
 test('brake haze needs heat, and dies in the airflow', () => {
-  assert.equal(brakeHaze(200, 0), 0, 'a cool duct does not shimmer');
+  assert.equal(brakeHaze(200, 15), 0, 'a cool duct does not shimmer');
+  assert.equal(brakeHaze(500, 0), 0, 'blanket-warm discs at rest are not a smoke plume');
+  assert.equal(brakeHaze(800, 0), 0, 'no airflow, no visible haze');
   const slowing = brakeHaze(800, 15);
   const flatOut = brakeHaze(800, 90);
+  assert.ok(slowing > 0, 'hot discs at low speed must haze');
   assert.ok(slowing > flatOut * 2, `haze should be strongest as the car slows: ${slowing} vs ${flatOut}`);
 });
 

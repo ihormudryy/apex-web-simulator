@@ -38,7 +38,7 @@
 
 import * as THREE from 'three';
 import {
-  jitterAt, JITTER_PERIOD, HISTORY_WEIGHT, CLIP_EXPAND,
+  jitterAt, JITTER_PERIOD, HYBRID_HISTORY_WEIGHT, CLIP_EXPAND,
 } from './haltonJitter.js';
 
 const VERTEX = /* glsl */`
@@ -151,7 +151,9 @@ void main() { gl_FragColor = texture2D(tDiffuse, vUv); }`;
  * at a CDN and the WebGPU build has a different module graph), and a static import
  * of `postprocessing/Pass.js` would break the WebGPU path at load time.
  */
-export function createTaaPass(Pass, FullScreenQuad, { width, height }) {
+export function createTaaPass(Pass, FullScreenQuad, {
+  width, height, historyWeight = HYBRID_HISTORY_WEIGHT,
+}) {
   class TaaPass extends Pass {
     constructor() {
       super();
@@ -178,7 +180,7 @@ export function createTaaPass(Pass, FullScreenQuad, { width, height }) {
           tHistory: { value: null },
           tDepth: { value: null },
           uTexel: { value: new THREE.Vector2(1 / width, 1 / height) },
-          uHistoryWeight: { value: HISTORY_WEIGHT },
+          uHistoryWeight: { value: historyWeight },
           uClipExpand: { value: CLIP_EXPAND },
           uFirstFrame: { value: true },
           uDebug: { value: 0 },

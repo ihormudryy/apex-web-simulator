@@ -15,14 +15,16 @@ import {
   CINEMATIC_DEFAULTS, CINEMATIC_SLIDERS, CINEMATIC_TOGGLES,
 } from './cinematicState.js';
 
-export const DEFAULT_REFLECTIVITY = 0.45;
+export const DEFAULT_REFLECTIVITY = 0.55;
 export const DEFAULT_AO_BLEND = 0.45;
+export const DEFAULT_RENDER_SCALE = 1.0;
 
 /** Every FX checkbox, lighting and cinematic alike. */
 export const FX_FLAGS = ['ssao', 'bounce', 'csm', 'taa', 'grade', ...CINEMATIC_TOGGLES];
 
 export const RENDER_SLIDERS = {
   toneExposure: { min: 0.2, max: 2.5, step: 0.01 },
+  renderScale: { min: 0.85, max: 1.25, step: 0.01 },
   envIntensity: { min: 0, max: 2, step: 0.01 },
   sunIntensity: { min: 0, max: 6, step: 0.05 },
   shadowIntensity: { min: 0, max: 1, step: 0.01 },
@@ -66,10 +68,11 @@ export function defaultRenderValues(backend = 'webgpu') {
     rimIntensity: rim,
     reflectivity: DEFAULT_REFLECTIVITY,
     aoBlend: DEFAULT_AO_BLEND,
+    renderScale: DEFAULT_RENDER_SCALE,
     ssao: false,
     bounce: true,
     csm: true,
-    taa: false,
+    taa: true,
     grade: true,
     ...CINEMATIC_DEFAULTS,
   };

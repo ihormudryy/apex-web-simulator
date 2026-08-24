@@ -4,7 +4,8 @@
  * Preference cannot hot-swap Three builds — toggle saves + reloads (see index.html).
  */
 
-export const RENDERER_PREF_KEY = 'helloracer.renderer';
+export const RENDERER_PREF_KEY = 'apex-web-simulator.renderer';
+export const LEGACY_RENDERER_PREF_KEY = 'helloracer.renderer';
 
 /**
  * @param {string} [search]
@@ -24,7 +25,8 @@ export function parseRendererMode(search = '', stored = null) {
  */
 export function readStoredRendererPreference(storage = globalThis.localStorage) {
   try {
-    const value = storage?.getItem?.(RENDERER_PREF_KEY);
+    const value = storage?.getItem?.(RENDERER_PREF_KEY)
+      ?? storage?.getItem?.(LEGACY_RENDERER_PREF_KEY);
     if (value === 'webgpu' || value === 'webgl') return value;
   } catch {
     /* private mode / denied */
@@ -80,8 +82,18 @@ export function setRendererPreferenceAndReload(mode, opts = {}) {
   assign(next);
 }
 
-function configureRenderer(renderer, THREE) {
-  renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
+export const DEFAULT_RENDER_SCALE = 1.0;
+/** Extra supersample headroom on high-DPR displays (~11 ms frame budget). */
+export const MAX_RENDER_SCALE = 1.25;
+
+/** Apply supersampling scale at runtime (Render panel slider). */
+export function applyRenderScale(renderer, renderScale = DEFAULT_RENDER_SCALE) {
+  const scale = Math.min(MAX_RENDER_SCALE, Math.max(0.75, renderScale));
+  renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2) * scale);
+}
+
+function configureRenderer(renderer, THREE, { renderScale = DEFAULT_RENDER_SCALE } = {}) {
+  applyRenderScale(renderer, renderScale);
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -93,13 +105,66 @@ function configureRenderer(renderer, THREE) {
 }
 
 /**
+ * Sampled-texture headroom we ask the WebGPU device for.
+ *
+ * WebGPU's default `maxSampledTexturesPerShaderStage` is 16, and the car's
+ * paint material alone wants map + roughness + metalness + normal + specular
+ * intensity + clearcoat roughness + clearcoat normal + environment. Add the
+ * ambient-occlusion texture the full pipeline threads into the material context
+ * and the fragment stage asks for 17, one over the line — at which point the
+ * bind-group layout is rejected, the pipeline for that material never builds,
+ * and the car is drawn *without its bodywork*: sidepods, engine cover and rear
+ * wing simply absent whenever AO was switched on.
+ *
+ * 32 is roughly double the default with room for another map or two, and small
+ * enough that most adapters have it (the one measured here reports 48).
+ */
+const WANTED_SAMPLED_TEXTURES = 32;
+
+/**
+ * Ask for more sampled textures per stage, but never more than the adapter
+ * advertises: `requestDevice` rejects a limit the adapter cannot meet, and
+ * failing to create the renderer at all would be a far worse trade than losing
+ * ambient occlusion. Returns undefined when the default is all we can get.
+ */
+async function webGpuRequiredLimits() {
+  try {
+    const adapter = await globalThis.navigator?.gpu?.requestAdapter?.();
+    const supported = adapter?.limits?.maxSampledTexturesPerShaderStage ?? 0;
+    if (supported > 16) {
+      return {
+        maxSampledTexturesPerShaderStage: Math.min(supported, WANTED_SAMPLED_TEXTURES),
+      };
+    }
+  } catch {
+    /* no WebGPU, or the adapter refused — fall through to the defaults */
+  }
+  return undefined;
+}
+
+/**
  * @returns {Promise<{ renderer, backend: 'webgl'|'webgpu', useCsm: boolean, useComposer: boolean, useRenderPipeline: boolean }>}
  */
-export async function createRendererBackend(THREE, { antialias = true } = {}) {
+export async function createRendererBackend(THREE, { antialias = true, renderScale } = {}) {
   if (wantsWebGpuRenderer()) {
-    const renderer = new THREE.WebGPURenderer({ antialias, forceWebGL: false });
+    // MSAA is deliberately off here, and `antialias` is ignored on this path.
+    // The node pipeline reads the scene depth (TRAA reprojection, DoF circle of
+    // confusion, GTAO, SSGI) via `pass.getTextureNode('depth')`, and WebGPU
+    // cannot resolve a multisampled depth attachment with a texture copy: with
+    // MSAA on, every frame raised
+    //   "Source [Texture depth] sample count (4) and destination ... (1) do not
+    //    match" -> "[Invalid CommandBuffer ... copyTextureToTexture]"
+    // twice a frame (~120/s, measured at default settings), so the depth those
+    // passes sampled was never the depth that had just been drawn. TRAA plus
+    // the sharpen pass is this path's antialiasing — that is what `hybridAa`
+    // means — and it needs valid depth far more than it needs MSAA on top.
+    const renderer = new THREE.WebGPURenderer({
+      antialias: false,
+      forceWebGL: false,
+      requiredLimits: await webGpuRequiredLimits(),
+    });
     await renderer.init();
-    configureRenderer(renderer, THREE);
+    configureRenderer(renderer, THREE, { renderScale });
     const onWebGl = renderer.backend?.isWebGLBackend === true;
     console.info(
       `[HelloRacer] WebGPURenderer (${onWebGl ? 'WebGL2 fallback' : 'WebGPU backend'}) — CSMShadowNode + TSL GTAO`,
@@ -114,7 +179,7 @@ export async function createRendererBackend(THREE, { antialias = true } = {}) {
   }
 
   const renderer = new THREE.WebGLRenderer({ antialias });
-  configureRenderer(renderer, THREE);
+  configureRenderer(renderer, THREE, { renderScale });
   return {
     renderer,
     backend: 'webgl',

@@ -28,7 +28,7 @@ export const NDC_TO_UV = 0.5;
  * costs nothing in normal driving — at 300 km/h the ground moves a few percent
  * of the screen per frame — and removes that flash completely.
  */
-export const MAX_STREAK_UV = 0.045;
+export const MAX_STREAK_UV = 0.028;
 
 /**
  * Taps along the streak. 16 is the addon's default and the knee of the quality
@@ -81,13 +81,13 @@ export const WEBGL_BLOOM_SCALE = 1 / 3;
  */
 export const CINEMATIC_DEFAULTS = {
   motionBlur: true,
-  motionBlurStrength: 1.0,
+  motionBlurStrength: 0.55,
   bloom: true,
   // Measured rather than eyeballed. Differencing bloom-on against bloom-off at
   // the grid, this lifts the frame by a mean of ~7/255 and newly clips 94
   // pixels out of 810,000 — a halo around the highlights rather than a loss of
   // detail. For comparison, 0.42 at a threshold of 2.6 measured +19.5/255.
-  bloomStrength: 0.12,
+  bloomStrength: 0.16,
   // A wide radius weights the coarsest mips hardest, which spreads a highlight
   // across the whole frame as haze rather than putting a halo around it. 0.85
   // measured as a frame-wide lift; 0.5 keeps the glow attached to its source.
@@ -151,6 +151,22 @@ export function clampStreak(x, y, maxLen = MAX_STREAK_UV) {
   return { x: x * scale, y: y * scale };
 }
 
+/** Reference speed (~200 km/h) where motion blur reaches full user strength. */
+export const MOTION_BLUR_REF_SPEED = 55;
+
+/**
+ * Scale blur by car speed so grass and kerbs stay readable at low speed.
+ *
+ * @param {number} speedMs car speed magnitude, m/s
+ * @param {number} userStrength slider value from the render panel
+ */
+export function motionBlurStrengthForSpeed(speedMs, userStrength) {
+  const s = Math.max(0, speedMs);
+  const t = Math.min(1, s / MOTION_BLUR_REF_SPEED);
+  const curve = t * t * (3 - 2 * t);
+  return userStrength * (0.12 + 0.88 * curve);
+}
+
 /**
  * Distance from the camera to whatever should be sharp — the car.
  *
@@ -173,13 +189,26 @@ export function focusDistanceFor(cameraPos, targetPos, { min = FOCUS_MIN, max = 
 }
 
 /**
+ * Everything that changes the shape of the node graph — the lens toggles plus
+ * grading.
+ *
+ * Grading belongs here even though the panel groups it with the lighting flags,
+ * because it is display-referred: the curve is authored in 0..1 display units
+ * and has to run *after* tone mapping (see `grading.js`). Switching it on
+ * therefore moves the output transform out of `RenderPipeline` and into the
+ * tail, which is a different graph, not a different uniform.
+ */
+export const GRAPH_TOGGLES = [...CINEMATIC_TOGGLES, 'grade'];
+const GRAPH_DEFAULTS = { ...CINEMATIC_DEFAULTS, grade: true };
+
+/**
  * The subset of values that decides which nodes exist in the graph.
  * @param {Record<string, unknown>} values
  */
 export function cinematicFeatures(values = {}) {
   const out = {};
-  for (const key of CINEMATIC_TOGGLES) {
-    out[key] = Boolean(values[key] ?? CINEMATIC_DEFAULTS[key]);
+  for (const key of GRAPH_TOGGLES) {
+    out[key] = Boolean(values[key] ?? GRAPH_DEFAULTS[key]);
   }
   // A lens flare is generated from the bloom texture, so it cannot outlive it.
   out.flare = out.flare && out.bloom;
@@ -188,5 +217,5 @@ export function cinematicFeatures(values = {}) {
 
 /** @param {Record<string, boolean>} a @param {Record<string, boolean>} b */
 export function featuresEqual(a, b) {
-  return CINEMATIC_TOGGLES.every(k => Boolean(a?.[k]) === Boolean(b?.[k]));
+  return GRAPH_TOGGLES.every(k => Boolean(a?.[k]) === Boolean(b?.[k]));
 }

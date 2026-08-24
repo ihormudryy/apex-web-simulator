@@ -4,7 +4,8 @@ import {
   NDC_TO_UV, MAX_STREAK_UV, MOTION_BLUR_SAMPLES, BLOOM_INPUT_CLAMP,
   CINEMATIC_DEFAULTS, CINEMATIC_SLIDERS, CINEMATIC_TOGGLES,
   FOCUS_MIN, FOCUS_MAX,
-  ndcVelocityToUv, clampStreak, focusDistanceFor,
+  ndcVelocityToUv, clampStreak, focusDistanceFor, motionBlurStrengthForSpeed,
+  MOTION_BLUR_REF_SPEED,
   cinematicFeatures, featuresEqual,
 } from './cinematicState.js';
 
@@ -46,6 +47,13 @@ test('streaks clamp in length but never change direction', () => {
   const zero = clampStreak(0, 0);
   assert.equal(zero.x, 0);
   assert.equal(zero.y, 0);
+});
+
+test('motion blur strength scales with speed', () => {
+  const base = CINEMATIC_DEFAULTS.motionBlurStrength;
+  assert.ok(motionBlurStrengthForSpeed(0, base) < base * 0.2);
+  assert.ok(Math.abs(motionBlurStrengthForSpeed(MOTION_BLUR_REF_SPEED, base) - base) < 1e-9);
+  assert.ok(motionBlurStrengthForSpeed(80, base) <= base);
 });
 
 test('focus distance is the camera-to-car distance, clamped', () => {
@@ -117,5 +125,20 @@ test('features fall back to defaults and compare by graph shape', () => {
   assert.ok(featuresEqual(
     cinematicFeatures({ bloomStrength: 0.1 }),
     cinematicFeatures({ bloomStrength: 1.9 }),
+  ));
+});
+
+test('grading is part of the graph shape, and defaults on', () => {
+  // Grading has to run in display units, downstream of tone mapping, so on the
+  // WebGPU path switching it takes the output transform away from
+  // RenderPipeline and gives it to the tail (`renderOutput` in cinematicPost).
+  // That is a different graph, so it has to force a rebuild the way the lens
+  // toggles do — while it was outside this set the checkbox moved and nothing
+  // happened, leaving 8.76% of the frame crushed at or below 5/255.
+  assert.equal(cinematicFeatures({}).grade, true);
+  assert.equal(cinematicFeatures({ grade: false }).grade, false);
+  assert.ok(!featuresEqual(
+    cinematicFeatures({ grade: true }),
+    cinematicFeatures({ grade: false }),
   ));
 });

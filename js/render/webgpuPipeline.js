@@ -161,6 +161,10 @@ function attachCinematicTail(pipeline, parts, uniforms, initialFeatures) {
   let current = initialFeatures;
   const build = features => {
     pipeline.outputNode = buildCinematicOutput({ ...parts, uniforms, features });
+    // Grading is display-referred, so with it on the tail has already applied
+    // tone mapping and the output colour space via `renderOutput`. Leaving the
+    // pipeline's own transform on would apply both a second time.
+    pipeline.outputColorTransform = !features.grade;
   };
   build(current);
   return {
@@ -176,25 +180,31 @@ function attachCinematicTail(pipeline, parts, uniforms, initialFeatures) {
 }
 
 /**
- * The cheap tier: one scene pass that also writes velocity, then the cinematic
- * tail. No GTAO, no SSGI, no TRAA.
- *
- * This exists because the full stack above is roughly twice the scene cost and
- * is opt-in behind the AO toggle — but bloom and motion blur are the default
- * look, and they only need colour, depth and velocity. Velocity is free here:
- * it is one more MRT target on a pass that was already being drawn, rather than
- * the separate pre-pass the AO tier needs.
+ * The default tier: scene pass (colour + velocity + depth) → TRAA → sharpen →
+ * cinematic tail. GTAO/SSGI stay behind the AO toggle; hybrid AA does not.
  *
  * @param {typeof import('three/webgpu')} THREE
  */
-function buildCinematicWebGpuPost(THREE, renderer, scene, camera, cinematicUniforms, features) {
+function buildCinematicWebGpuPost(THREE, renderer, scene, camera, cinematicUniforms, features, {
+  sharpenAmount = 0.38,
+  hybridAa = true,
+} = {}) {
   const pipeline = new THREE.RenderPipeline(renderer);
 
   const scenePass = pass(scene, camera);
   scenePass.setMRT(mrt({ output, velocity }));
 
+  let color = scenePass.getTextureNode('output');
+  if (hybridAa) {
+    const depth = scenePass.getTextureNode('depth');
+    const vel = scenePass.getTextureNode('velocity');
+    const traaPass = traa(color, depth, vel, camera);
+    traaPass.useSubpixelCorrection = false;
+    color = sharpen(traaPass, float(sharpenAmount));
+  }
+
   const tail = attachCinematicTail(pipeline, {
-    color: scenePass.getTextureNode('output'),
+    color,
     velocity: scenePass.getTextureNode('velocity'),
     viewZ: scenePass.getViewZNode(),
   }, cinematicUniforms, features);
@@ -268,11 +278,13 @@ export function createWebGpuPost(THREE, renderer, scene, camera, options = {}) {
   // frame for a pipeline the player may never switch to.
   let cinematic = null;
   let cinematicUnavailable = false;
+  const hybridAa = options.hybridAa !== false;
   const getCinematicPipeline = () => {
     if (cinematic || cinematicUnavailable) return cinematic;
     try {
       cinematic = buildCinematicWebGpuPost(
         THREE, renderer, scene, camera, cinematicUniforms, features,
+        { hybridAa, sharpenAmount: options.sharpenAmount ?? 0.38 },
       );
     } catch (err) {
       console.warn('[HelloRacer] Cinematic post stack unavailable:', err);

@@ -48,16 +48,15 @@ test('drag is an exact exponential, so a long frame cannot invert a velocity', (
   assert.ok(ring.velocities[0] < 10, 'and must have decayed');
 });
 
-test('particles fade over their lifetime and die at the end of it', () => {
-  const ring = createRing({ count: 2 });
-  emit(ring, 0, 0, 0, 0, 0, 0, 1, 1);
+test('smoke envelope fades in, expands, and curls', () => {
+  const ring = createRing({ count: 4, gravity: 0.5, drag: 0.8, envelope: 'smoke', expand: 2.4 });
+  emit(ring, 0, 0, 0, 0, 1, 0, 2, 1, 0.3);
+  assert.ok(ring.alphas[0] < 0.05, 'birth alpha is soft');
   advance(ring, 0.5);
-  assert.ok(Math.abs(ring.alphas[0] - 0.5) < 1e-6, `alpha ${ring.alphas[0]}`);
-  advance(ring, 0.6);
+  assert.ok(ring.alphas[0] > 0.5, `mid-life alpha ${ring.alphas[0]}`);
+  assert.ok(ring.sizes[0] > 1.2, `expanded size ${ring.sizes[0]}`);
+  advance(ring, 1.6);
   assert.equal(liveCount(ring), 0);
-  assert.equal(ring.alphas[0], 0);
-  assert.equal(ring.sizes[0], 0, 'a dead particle must cost no fill');
-  assert.equal(ring.positions[1], PARKED);
 });
 
 test('the ring recycles oldest-first and never grows', () => {

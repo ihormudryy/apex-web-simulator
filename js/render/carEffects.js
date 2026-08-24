@@ -28,29 +28,72 @@ import { createRing, emit, advance, createBudget, takeBudget } from './particleR
 import { createMarkBuffer, layMark } from './tyreMarks.js';
 
 import { enableCarParticleSystems } from './carParticleBackend.js';
+import { smokePuff, SOFT_PARTICLE_METRES } from './smokeLook.js';
 
 export { enableCarParticleSystems };
 
 const WHEELS = 4;
+
+/** Placeholder so WebGL does not warn about an unbound depth sampler. */
+let _dummyDepth = null;
+function dummyDepthTexture() {
+  if (_dummyDepth) return _dummyDepth;
+  _dummyDepth = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+  _dummyDepth.needsUpdate = true;
+  return _dummyDepth;
+}
+
+/** @type {null | typeof import('./carEffectsWebGpu.js')} */
+let webGpuParticles = null;
+
+/**
+ * Lazy-load the WebGPU sprite path so the WebGL import map never pulls in `three/tsl`.
+ * @returns {Promise<typeof import('./carEffectsWebGpu.js')>}
+ */
+async function loadWebGpuParticles() {
+  if (!webGpuParticles) webGpuParticles = await import('./carEffectsWebGpu.js');
+  return webGpuParticles;
+}
+
+/**
+ * Preload WebGPU particle module during boot (call from HelloRacer after backend resolve).
+ */
+export async function prepareCarEffectsBackend(backend) {
+  if (backend === 'webgpu') await loadWebGpuParticles();
+}
 
 // ---------------------------------------------------------------------------
 // Geometry around the pure ring
 // ---------------------------------------------------------------------------
 
 /**
- * `Points` over a `particleRing`, with a soft round sprite generated in the shader
- * rather than sampled from a texture — a 64x64 blob map is a texture upload, a
- * mip chain and a binding for something `smoothstep` does in two instructions.
+ * Soft round particles. WebGL: classic Points + ShaderMaterial. WebGPU: Sprite +
+ * PointsNodeMaterial (see `carEffectsWebGpu.js`).
  *
- * WebGL only: see `enableCarParticleSystems`.
+ * @param {object} opts
+ * @param {'webgl' | 'webgpu'} [opts.backend]
  */
-function createParticleSystem({ count, size, color, opacity, gravity, drag, blending, attenuate = true }) {
-  const ring = createRing({ count, gravity, drag });
+function createParticleSystem({
+  count, size, color, opacity, gravity, drag, blending, attenuate = true,
+  backend = 'webgl', envelope = 'linear', expand = 1, soft = false,
+}) {
+  if (backend === 'webgpu') {
+    if (!webGpuParticles) {
+      throw new Error('prepareCarEffectsBackend("webgpu") must run before createCarEffects');
+    }
+    return webGpuParticles.createWebGpuParticleSystem({
+      count, size, color, opacity, gravity, drag, blending, attenuate,
+      envelope, expand, soft,
+    });
+  }
+
+  const ring = createRing({ count, gravity, drag, envelope, expand });
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(ring.positions, 3));
   geometry.setAttribute('aSize', new THREE.BufferAttribute(ring.sizes, 1));
   geometry.setAttribute('aAlpha', new THREE.BufferAttribute(ring.alphas, 1));
+  geometry.setAttribute('aSeed', new THREE.BufferAttribute(ring.seeds, 1));
   // A generous sphere: these move every frame, and recomputing bounds to cull a
   // few hundred points is the wrong trade.
   geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e5);
@@ -61,47 +104,106 @@ function createParticleSystem({ count, size, color, opacity, gravity, drag, blen
       uOpacity: { value: opacity },
       uScale: { value: size },
       uAttenuate: { value: attenuate ? 1 : 0 },
+      uSoft: { value: soft ? 1 : 0 },
+      tDepth: { value: dummyDepthTexture() },
+      uResolution: { value: new THREE.Vector2(1, 1) },
+      uCameraNear: { value: 0.3 },
+      uCameraFar: { value: 1400 },
+      uSoftness: { value: soft ? SOFT_PARTICLE_METRES : 0 },
+      uDepthFade: { value: 0 },
     },
     vertexShader: /* glsl */`
       attribute float aSize;
       attribute float aAlpha;
+      attribute float aSeed;
       varying float vAlpha;
+      varying float vSeed;
+      varying float vViewDist;
       uniform float uScale;
       uniform float uAttenuate;
       void main() {
         vAlpha = aAlpha;
+        vSeed = aSeed;
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vViewDist = -mv.z;
         gl_Position = projectionMatrix * mv;
         float attenuation = mix(1.0, 300.0 / max(-mv.z, 1.0), uAttenuate);
         gl_PointSize = uScale * aSize * attenuation;
       }`,
     fragmentShader: /* glsl */`
       varying float vAlpha;
+      varying float vSeed;
+      varying float vViewDist;
       uniform vec3 uColor;
       uniform float uOpacity;
+      uniform float uSoft;
+      uniform sampler2D tDepth;
+      uniform vec2 uResolution;
+      uniform float uCameraNear;
+      uniform float uCameraFar;
+      uniform float uSoftness;
+      uniform float uDepthFade;
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+      }
+      float perspectiveDepthToViewZ(const in float depth, const in float near, const in float far) {
+        return (near * far) / ((far - near) * depth - far);
+      }
       void main() {
         vec2 d = gl_PointCoord - 0.5;
         float r = length(d);
         if (r > 0.5) discard;
-        float falloff = smoothstep(0.5, 0.05, r);
-        gl_FragColor = vec4(uColor, vAlpha * uOpacity * falloff);
+        float falloff;
+        if (uSoft > 0.5) {
+          // Soft volumetric puff: dense core, soft mid, barely-there rim, mottled.
+          float core = smoothstep(0.28, 0.0, r);
+          float mid = smoothstep(0.48, 0.12, r);
+          float rim = smoothstep(0.5, 0.22, r);
+          float n = hash(gl_PointCoord * 28.0 + vSeed * 17.0);
+          float n2 = hash(gl_PointCoord.yx * 51.0 - vSeed * 9.0);
+          float mottled = mix(0.72, 1.18, n) * mix(0.85, 1.1, n2);
+          falloff = (core * 0.5 + mid * 0.35 + rim * 0.18) * mottled;
+          falloff *= falloff; // concentrate density toward the centre
+        } else {
+          falloff = smoothstep(0.5, 0.05, r);
+        }
+        float fade = 1.0;
+        if (uDepthFade > 0.5 && uSoftness > 0.0) {
+          float packed = texture2D(tDepth, gl_FragCoord.xy / max(uResolution, vec2(1.0))).x;
+          if (packed > 1.0e-5) {
+            float sceneDist = -perspectiveDepthToViewZ(packed, uCameraNear, uCameraFar);
+            float gap = sceneDist - vViewDist;
+            float t = clamp(gap / uSoftness, 0.0, 1.0);
+            fade = t * t * (3.0 - 2.0 * t);
+          }
+        }
+        float a = vAlpha * uOpacity * falloff * fade;
+        gl_FragColor = vec4(uColor * falloff, a);
       }`,
     transparent: true,
     depthWrite: false,
     blending,
+    // Premultiply-ish look: soft edges over asphalt without hard discs.
+    premultipliedAlpha: soft,
   });
 
   const points = new THREE.Points(geometry, material);
   points.frustumCulled = false;
+  if (soft) points.renderOrder = 8;
 
-  return { ring, points, geometry, material, budget: createBudget() };
+  return { ring, points, geometry, material, budget: createBudget(), webgpu: false };
 }
 
 function flushSystem(sys, dt) {
   advance(sys.ring, dt);
+  if (sys.webgpu) {
+    webGpuParticles.flushWebGpuParticleSystem(sys);
+    return;
+  }
   sys.geometry.attributes.position.needsUpdate = true;
   sys.geometry.attributes.aSize.needsUpdate = true;
   sys.geometry.attributes.aAlpha.needsUpdate = true;
+  if (sys.geometry.attributes.aSeed) sys.geometry.attributes.aSeed.needsUpdate = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,33 +241,41 @@ export function flushMarks(marks) {
 
 /**
  * @param {THREE.Scene} scene
- * @param {{ particles?: boolean }} [options]
- *   `particles` defaults to true (WebGL). Pass false on the WebGPU path.
+ * @param {{ particles?: boolean, backend?: 'webgl' | 'webgpu' }} [options]
+ *   `particles` defaults to true. Pass `backend: 'webgpu'` for Sprite draw path.
  */
-export function createCarEffects(scene, { particles = true } = {}) {
+export function createCarEffects(scene, { particles = true, backend = 'webgl' } = {}) {
   const marks = createTyreMarkTexture();
   const empty = {
     smoke: null,
     sparks: null,
     haze: null,
     marks,
+    smokeBudget: 1,
     _glow: { r: 0, g: 0, b: 0, intensity: 0 },
     rates: { smoke: 0, sparks: 0, haze: 0 },
   };
   if (!particles) return empty;
 
+  const opts = { backend };
   const smoke = createParticleSystem({
-    count: 900,
-    size: 26,
-    color: 0xd8d4cf,
-    opacity: 0.30,
-    gravity: 1.2,
-    drag: 1.6,
+    count: 1400,
+    // World metres on WebGPU sprites; pixel-ish scale on WebGL Points.
+    size: backend === 'webgpu' ? 1.45 : 56,
+    // Warm rubber-grey, not chalk white — real tyre smoke is dirty.
+    color: 0xb8b0a6,
+    opacity: 0.38,
+    gravity: 0.55,
+    drag: 0.85,
     blending: THREE.NormalBlending,
+    envelope: 'smoke',
+    expand: 3.1,
+    soft: true,
+    ...opts,
   });
   const sparks = createParticleSystem({
     count: 700,
-    size: 5,
+    size: backend === 'webgpu' ? 0.12 : 5,
     color: 0xffb857,
     opacity: 1.0,
     gravity: -14,
@@ -173,15 +283,17 @@ export function createCarEffects(scene, { particles = true } = {}) {
     // Additive, because sparks are emitters: a spark over a dark tyre has to
     // brighten it, not tint it.
     blending: THREE.AdditiveBlending,
+    ...opts,
   });
   const haze = createParticleSystem({
     count: 260,
-    size: 34,
+    size: backend === 'webgpu' ? 0.55 : 28,
     color: 0xbfc4cc,
-    opacity: 0.06,
+    opacity: 0.05,
     gravity: 2.4,
     drag: 1.1,
     blending: THREE.NormalBlending,
+    ...opts,
   });
 
   for (const sys of [smoke, sparks, haze]) scene.add(sys.points);
@@ -193,6 +305,7 @@ export function createCarEffects(scene, { particles = true } = {}) {
     marks,
     _glow: empty._glow,
     rates: empty.rates,
+    smokeBudget: 1,
   };
 }
 
@@ -219,18 +332,28 @@ export function updateCarEffects(fx, c, dt) {
     if (particles) {
       const rate = smokeRate(sim.slipSpeed[i], sim.fz[i], sim.tyreT[i]);
       smokeTotal += rate;
-      const puffs = takeBudget(fx.smoke.budget, rate * 90 * dt);
-      for (let k = 0; k < puffs; k++) {
-        // Thrown back from the contact patch at a fraction of road speed, then it
-        // billows: a plume that simply rises is steam, not tyre smoke.
-        emit(
-          fx.smoke.ring, w.x, w.y + 0.1, w.z,
-          (Math.random() - 0.5) * 3 - c.forwardX * speed * 0.06,
-          0.7 + Math.random() * 1.4,
-          (Math.random() - 0.5) * 3 - c.forwardZ * speed * 0.06,
-          0.7 + Math.random() * 0.9,
-          0.5 + Math.random() * 0.9,
-        );
+      // Dense enough to read as a plume; ignore whisper-level slip so rolling
+      // creep does not seed a permanent cloud.
+      if (rate >= 0.04) {
+        const budget = fx.smokeBudget ?? 1;
+        const puffs = takeBudget(fx.smoke.budget, rate * 110 * dt * budget);
+        for (let k = 0; k < puffs; k++) {
+          const puff = smokePuff(rate);
+          const side = (Math.random() - 0.5) * puff.scatter;
+          const along = (Math.random() - 0.5) * puff.scatter * 0.45;
+          emit(
+            fx.smoke.ring,
+            w.x + along * c.forwardX + side * c.forwardZ * 0.35,
+            w.y + 0.06 + Math.random() * 0.08,
+            w.z + along * c.forwardZ - side * c.forwardX * 0.35,
+            -c.forwardX * speed * puff.back + (Math.random() - 0.5) * puff.scatter * 0.55,
+            puff.rise,
+            -c.forwardZ * speed * puff.back + (Math.random() - 0.5) * puff.scatter * 0.55,
+            puff.life,
+            puff.size,
+            puff.seed,
+          );
+        }
       }
 
       const h = brakeHaze(sim.brakeT[i], speed);
@@ -329,6 +452,38 @@ export function updateCarEffects(fx, c, dt) {
   return fx.rates;
 }
 
+/**
+ * Bind last-frame (WebGL) scene depth so smoke fades against the car and ribbon.
+ * WebGPU samples viewport depth in the material and only needs softness.
+ *
+ * @param {object} fx
+ * @param {{ depthTexture?: import('three').Texture | null, resolution?: import('three').Vector2, camera?: import('three').Camera }} [opts]
+ */
+export function bindSoftParticleDepth(fx, {
+  depthTexture = null,
+  resolution = null,
+  camera = null,
+} = {}) {
+  if (!fx) return;
+  const enabled = Boolean(depthTexture && camera && resolution);
+  for (const sys of [fx.smoke, fx.haze]) {
+    if (!sys) continue;
+    if (sys.webgpu) {
+      if (sys.uSoftness) sys.uSoftness.value = SOFT_PARTICLE_METRES;
+      continue;
+    }
+    const u = sys.material?.uniforms;
+    if (!u?.uDepthFade) continue;
+    u.tDepth.value = depthTexture || dummyDepthTexture();
+    u.uDepthFade.value = enabled ? 1 : 0;
+    if (camera) {
+      u.uCameraNear.value = camera.near;
+      u.uCameraFar.value = camera.far;
+    }
+    if (resolution) u.uResolution.value.copy(resolution);
+  }
+}
+
 /** Plank contact stiffness, matching `aero.K_PLANK`. */
 const PLANK_STIFFNESS = 8e6;
 
@@ -359,7 +514,7 @@ export function disposeCarEffects(fx, scene) {
   for (const sys of [fx.smoke, fx.sparks, fx.haze]) {
     if (!sys) continue;
     scene.remove(sys.points);
-    sys.geometry.dispose();
+    sys.geometry?.dispose?.();
     sys.material.dispose();
   }
   fx.marks.texture.dispose();

@@ -6,6 +6,7 @@ import {
   defaultRenderValues,
   DEFAULT_AO_BLEND,
   DEFAULT_REFLECTIVITY,
+  DEFAULT_RENDER_SCALE,
   RENDER_SLIDERS,
   sanitizeRenderValues,
 } from './renderPanelState.js';
@@ -43,7 +44,8 @@ test('defaultRenderValues follow lighting balance and backend fill', () => {
   assert.equal(webgl.ssao, false);
   assert.equal(webgl.bounce, true);
   assert.equal(webgl.csm, true);
-  assert.equal(webgl.taa, false);
+  assert.equal(webgl.taa, true);
+  assert.equal(webgl.renderScale, DEFAULT_RENDER_SCALE);
   assert.equal(webgl.grade, true);
 });
 

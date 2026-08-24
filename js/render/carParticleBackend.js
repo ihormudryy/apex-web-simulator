@@ -1,14 +1,17 @@
 /**
- * Whether to build the smoke / spark / haze `Points` systems.
+ * Whether to build the smoke / spark / haze particle systems.
  *
- * Those systems use classic `ShaderMaterial` soft sprites. WebGPU's NodeBuilder
- * rejects `ShaderMaterial`, and WebGPU point primitives are also capped at 1 px,
- * so the WebGPU path keeps tyre marks (and brake glow) but skips the Points.
- *
- * Free of three.js so the decision can be unit-tested under Node.
+ * WebGL uses classic `ShaderMaterial` Points. WebGPU uses instanced Sprites with
+ * `PointsNodeMaterial` (point primitives are 1 px only). Both backends run the
+ * same CPU ring in `particleRing.js`.
  *
  * @param {'webgl' | 'webgpu'} backend
  */
 export function enableCarParticleSystems(backend) {
-  return backend !== 'webgpu';
+  return backend === 'webgl' || backend === 'webgpu';
+}
+
+/** Draw path for sized soft particles on a given backend. */
+export function particleDrawBackend(backend) {
+  return backend === 'webgpu' ? 'sprite' : 'points';
 }

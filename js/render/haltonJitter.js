@@ -66,7 +66,14 @@ export function jitterAt(frame, out = { x: 0, y: 0 }) {
  * geometry, short enough that a mistake — a wrong reprojection, a disoccluded
  * pixel — is gone in a sixth of a second rather than smeared across the screen.
  */
+/** Heavy accumulation — kept for experiments; default hybrid path uses the light weight. */
 export const HISTORY_WEIGHT = 0.9;
+
+/**
+ * Light temporal blend for MSAA + hybrid AA. Short enough that smear stays low,
+ * long enough to settle thin geometry over a few frames.
+ */
+export const HYBRID_HISTORY_WEIGHT = 0.52;
 
 /**
  * Reject history that has drifted too far from the current neighbourhood.

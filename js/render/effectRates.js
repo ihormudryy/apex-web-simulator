@@ -92,11 +92,14 @@ export function markIntensity(slipSpeed, load, staticLoad = 2000) {
  * as the car slows into a corner, not on the straight where the air is moving fast
  * enough to carry it away. Exhaust haze follows engine load.
  */
-export const HAZE_BRAKE_THRESHOLD_C = 350;
+export const HAZE_BRAKE_THRESHOLD_C = 520;
 export const HAZE_SPEED_SCATTER = 45;
 
 export function brakeHaze(discT, speed) {
   const heat = clamp((discT - HAZE_BRAKE_THRESHOLD_C) / 450, 0, 1);
+  // Standing still with blanket-warm discs must not look like tyre smoke.
+  // Haze only reads once there is some airflow past the ducts.
+  if (Math.abs(speed) < 8) return 0;
   const still = 1 / (1 + Math.abs(speed) / HAZE_SPEED_SCATTER);
   return heat * still;
 }

@@ -22,11 +22,8 @@ const CSS = `
   --slate: #7b8798;
   --blue: #35b6ff;
 
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 200;
-  width: 248px;
+  position: relative;
+  width: 100%;
   pointer-events: auto;
   font-family: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
@@ -116,6 +113,48 @@ const CSS = `
   margin: 0;
   accent-color: var(--blue);
 }
+.rpanel__quick {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 0 11px 8px;
+  border-bottom: 1px solid rgba(163, 186, 219, 0.12);
+}
+.rpanel__btn {
+  margin: 0;
+  padding: 5px 4px;
+  border: 1px solid rgba(163, 186, 219, 0.22);
+  background: var(--carbon-well);
+  color: var(--slate);
+  font: inherit;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.rpanel__btn:hover {
+  color: var(--ice);
+  border-color: var(--edge-bright);
+}
+.rpanel__btn--on {
+  background: rgba(53, 182, 255, 0.18);
+  border-color: rgba(53, 182, 255, 0.55);
+  color: var(--ice);
+}
+/* Effects the active backend cannot run: visible, so the WebGPU path's extra
+   capability is discoverable, but plainly not available here. */
+.rpanel__btn--inert,
+.rpanel__row--inert {
+  opacity: 0.38;
+  cursor: not-allowed;
+  text-decoration: line-through;
+}
+.rpanel__btn:focus-visible {
+  outline: 1px solid var(--blue);
+  outline-offset: 1px;
+}
 .rpanel__toggles {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -159,6 +198,7 @@ function el(tag, className, text) {
 
 const SLIDER_ROWS = [
   { key: 'toneExposure', label: 'Exposure' },
+  { key: 'renderScale', label: 'Supersample' },
   { key: 'envIntensity', label: 'Env / IBL' },
   { key: 'sunIntensity', label: 'Sun' },
   { key: 'shadowIntensity', label: 'Shadow' },
@@ -168,21 +208,54 @@ const SLIDER_ROWS = [
   { key: 'aoBlend', label: 'AO blend' },
 ];
 
+/** Quick-access toggles (formerly keys 1–6). Always visible on the panel shell. */
+const QUICK_TOGGLE_ROWS = [
+  { key: 'ssao', label: 'AO', title: 'Ambient occlusion / GTAO' },
+  { key: 'bounce', label: 'Fill', title: 'Hemisphere sky fill' },
+  { key: 'csm', label: 'CSM', title: 'Cascaded shadow maps' },
+  { key: 'motionBlur', label: 'Blur', title: 'Motion blur' },
+  { key: 'bloom', label: 'Bloom', title: 'Bloom' },
+  { key: 'dof', label: 'DoF', title: 'Depth of field' },
+];
+
 const TOGGLE_ROWS = [
-  { key: 'ssao', label: 'AO / GTAO', hint: '1' },
-  { key: 'bounce', label: 'Bounce', hint: '2' },
-  { key: 'csm', label: 'CSM', hint: '3' },
-  { key: 'taa', label: 'TAA', hint: 'T' },
+  { key: 'taa', label: 'Hybrid AA', hint: 'T' },
   { key: 'grade', label: 'Grade', hint: 'G' },
 ];
 
 /** WebGPU only, apart from bloom — see `_fx` in HelloRacer. */
 const CINEMATIC_TOGGLE_ROWS = [
-  { key: 'motionBlur', label: 'Motion blur', hint: '4' },
-  { key: 'bloom', label: 'Bloom', hint: '5' },
   { key: 'flare', label: 'Lens flare', hint: '' },
-  { key: 'dof', label: 'Depth of field', hint: '6' },
 ];
+
+/**
+ * Controls with no implementation on the WebGL composer.
+ *
+ * Motion blur, depth of field and the lens flare are nodes in the TSL tail
+ * (`cinematicPost.js`); `_setCinematicFlag` wires only `bloom` through to a
+ * WebGL pass, so on that backend the other three set a flag nothing reads. They
+ * are disabled rather than hidden: measured against a frame-to-frame noise
+ * floor they moved nothing at all, and a control that silently does nothing is
+ * worse than one that says why. Bloom's own sliders do work on WebGL —
+ * `_applyCinematicSlider` pushes them into `UnrealBloomPass`.
+ */
+const WEBGPU_ONLY_FX = new Set([
+  'motionBlur', 'dof', 'flare', 'motionBlurStrength', 'flareAmount',
+  'dofRange', 'dofBokeh',
+]);
+
+/**
+ * The other direction: controls with no *working* WebGPU implementation.
+ *
+ * `CSMShadowNode` cannot be switched off after it is attached. Measured on the
+ * grid, flipping the sun's `castShadow` moved the frame by 0.6/255 and setting
+ * `shadow.intensity` to 0 moved it by nothing at all — the cascade keeps being
+ * sampled either way. The same two levers work on the WebGL `CSM` addon, where
+ * switching shadows off brightens the frame by 10.7/255 with a 35.5/255 peak
+ * exactly where the car's shadow lay. So on WebGPU the cascade simply stays on,
+ * which is the right look anyway; what is wrong is offering a switch for it.
+ */
+const WEBGL_ONLY_FX = new Set(['csm', 'shadowIntensity']);
 
 const CINEMATIC_SLIDER_ROWS = [
   { key: 'motionBlurStrength', label: 'Blur amount' },
@@ -219,6 +292,7 @@ export class RenderPanel {
     this._open = false;
     this._fpsFrames = 0;
     this._fpsAccum = 0;
+    this._meterExtra = '';
     this._sliders = new Map();
     this._toggles = new Map();
 
@@ -233,6 +307,11 @@ export class RenderPanel {
       el('span', 'rpanel__chevron', '▸'),
     );
     this._head.addEventListener('click', () => this.toggle());
+
+    this._quick = el('div', 'rpanel__quick');
+    for (const row of QUICK_TOGGLE_ROWS) {
+      this._quick.append(this._makeToggleButton(row.key, row.label, row.title));
+    }
 
     this._body = el('div', 'rpanel__body');
 
@@ -256,7 +335,7 @@ export class RenderPanel {
       toggles.append(this._makeToggle(row.key, row.label, row.hint));
     }
     fxSection.append(toggles);
-    fxSection.append(el('div', 'rpanel__hint', 'Keys 1 · 2 · 3 · T · G sync here'));
+    fxSection.append(el('div', 'rpanel__hint', 'Keys T · G sync here'));
     this._body.append(fxSection);
 
     const cineSection = el('div', 'rpanel__section');
@@ -269,10 +348,9 @@ export class RenderPanel {
     for (const row of CINEMATIC_SLIDER_ROWS) {
       cineSection.append(this._makeSlider(row.key, row.label));
     }
-    cineSection.append(el('div', 'rpanel__hint', 'Keys 4 · 5 · 6 sync here'));
     this._body.append(cineSection);
 
-    shell.append(this._head, this._body);
+    shell.append(this._head, this._quick, this._body);
     this.root.append(shell);
     container.appendChild(this.root);
   }
@@ -301,10 +379,26 @@ export class RenderPanel {
   syncFx(fx) {
     for (const key of FX_FLAGS) {
       if (fx[key] === undefined) continue;
-      const on = Boolean(fx[key]);
-      this._values[key] = on;
-      const input = this._toggles.get(key);
-      if (input) input.checked = on;
+      this._setToggleState(key, Boolean(fx[key]));
+    }
+  }
+
+  /** @param {string} key @param {boolean} on */
+  _setToggleState(key, on) {
+    this._values[key] = on;
+    const ctrl = this._toggles.get(key);
+    if (!ctrl) return;
+    // An inert control shows what the backend actually does, not what the flag
+    // says. `_fx.motionBlur` defaults to true, so without this a keyboard
+    // shortcut or a `syncFx` would light up a button for an effect that is not
+    // running at all on WebGL.
+    const stuck = this._stuckAt(key);
+    if (stuck !== undefined) on = stuck;
+    if (ctrl.type === 'checkbox') {
+      ctrl.checked = on;
+    } else {
+      ctrl.classList.toggle('rpanel__btn--on', on);
+      ctrl.setAttribute('aria-pressed', String(on));
     }
   }
 
@@ -325,6 +419,14 @@ export class RenderPanel {
   }
 
   /**
+   * Extra status on the FPS meter (quality preset / auto).
+   * @param {string} text
+   */
+  setMeterExtra(text) {
+    this._meterExtra = text || '';
+  }
+
+  /**
    * Call once per frame with frame delta in seconds.
    * @param {number} dt
    */
@@ -336,9 +438,28 @@ export class RenderPanel {
     if (this._fpsAccum < 0.4) return;
     const fps = this._fpsFrames / this._fpsAccum;
     const ms = 1000 / fps;
-    this._fpsEl.textContent = `${fps.toFixed(0)} fps · ${ms.toFixed(1)} ms`;
+    const extra = this._meterExtra ? ` · ${this._meterExtra}` : '';
+    this._fpsEl.textContent = `${fps.toFixed(0)} fps · ${ms.toFixed(1)} ms${extra}`;
     this._fpsFrames = 0;
     this._fpsAccum = 0;
+  }
+
+  /**
+   * For a control the active backend cannot honour, the value its effect is
+   * really stuck at — `false` where the effect does not exist, `true` where it
+   * exists and cannot be switched off. `undefined` when the control works.
+   *
+   * The direction matters: showing an unswitchable cascade as "off" would be a
+   * second lie on top of the first.
+   */
+  _stuckAt(key) {
+    if (this._backend === 'webgpu') return WEBGL_ONLY_FX.has(key) ? true : undefined;
+    return WEBGPU_ONLY_FX.has(key) ? false : undefined;
+  }
+
+  /** True when this control exists in the UI but not in the active backend. */
+  _isInert(key) {
+    return this._stuckAt(key) !== undefined;
   }
 
   _makeSlider(key, label) {
@@ -362,6 +483,11 @@ export class RenderPanel {
       this._onChange(key, v, this.values);
     });
     row.append(input);
+    if (this._isInert(key)) {
+      input.disabled = true;
+      row.classList.add('rpanel__row--inert');
+      row.title = `${label} needs the WebGPU backend`;
+    }
     this._sliders.set(key, { input, val });
     return row;
   }
@@ -372,13 +498,52 @@ export class RenderPanel {
     input.type = 'checkbox';
     input.checked = Boolean(this._values[key]);
     input.addEventListener('change', () => {
-      const on = input.checked;
-      this._values[key] = on;
-      this._onChange(key, on, this.values);
+      this._setToggleState(key, input.checked);
+      this._onChange(key, input.checked, this.values);
     });
-    wrap.append(input, document.createTextNode(`${label} (${hint})`));
+    const stuck = this._stuckAt(key);
+    const inert = stuck !== undefined;
+    const hintText = inert
+      ? (stuck ? ' (always on)' : ' (WebGPU only)')
+      : (hint ? ` (${hint})` : '');
+    if (inert) {
+      input.disabled = true;
+      input.checked = stuck;
+      wrap.classList.add('rpanel__row--inert');
+      wrap.title = stuck
+        ? `${label} cannot be switched off on this backend`
+        : `${label} needs the WebGPU backend`;
+    }
+    wrap.append(input, document.createTextNode(`${label}${hintText}`));
     this._toggles.set(key, input);
     return wrap;
+  }
+
+  _makeToggleButton(key, label, title) {
+    const btn = el('button', 'rpanel__btn', label);
+    btn.type = 'button';
+    const stuck = this._stuckAt(key);
+    const inert = stuck !== undefined;
+    btn.title = inert
+      ? `${title} — ${stuck ? 'always on for this backend' : 'WebGPU backend only'}`
+      : title;
+    const on = inert ? stuck : Boolean(this._values[key]);
+    btn.classList.toggle('rpanel__btn--on', on);
+    btn.setAttribute('aria-pressed', String(on));
+    if (inert) {
+      btn.disabled = true;
+      btn.classList.add('rpanel__btn--inert');
+      this._toggles.set(key, btn);
+      return btn;
+    }
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const next = !this._values[key];
+      this._setToggleState(key, next);
+      this._onChange(key, next, this.values);
+    });
+    this._toggles.set(key, btn);
+    return btn;
   }
 
   _makeWebGpuToggle() {

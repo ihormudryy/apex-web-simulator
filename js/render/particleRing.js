@@ -1,3 +1,5 @@
+import { smokeAlpha, smokeSizeScale } from './smokeLook.js';
+
 /**
  * A fixed-budget particle ring.
  *
@@ -17,8 +19,10 @@
  * @param {number} spec.count vertex budget
  * @param {number} spec.gravity m/s², signed — negative falls
  * @param {number} spec.drag exponential velocity decay, per second
+ * @param {'linear' | 'smoke'} [spec.envelope] alpha / size over life
+ * @param {number} [spec.expand] final size / birth size when envelope is smoke
  */
-export function createRing({ count, gravity = 0, drag = 0 }) {
+export function createRing({ count, gravity = 0, drag = 0, envelope = 'linear', expand = 1 }) {
   const positions = new Float32Array(count * 3);
   const velocities = new Float32Array(count * 3);
   // Dead particles are parked far away rather than removed from the draw range:
@@ -28,20 +32,24 @@ export function createRing({ count, gravity = 0, drag = 0 }) {
     count,
     gravity,
     drag,
+    envelope,
+    expand,
     cursor: 0,
     positions,
     velocities,
     ages: new Float32Array(count),
     lifetimes: new Float32Array(count),
     sizes: new Float32Array(count),
+    birthSizes: new Float32Array(count),
     alphas: new Float32Array(count),
+    seeds: new Float32Array(count),
     live: 0,
   };
 }
 
 export const PARKED = 1e6;
 
-export function emit(ring, x, y, z, vx, vy, vz, life, size) {
+export function emit(ring, x, y, z, vx, vy, vz, life, size, seed = Math.random()) {
   const i = ring.cursor;
   ring.cursor = (i + 1) % ring.count;
   if (ring.lifetimes[i] <= 0) ring.live++;
@@ -54,8 +62,10 @@ export function emit(ring, x, y, z, vx, vy, vz, life, size) {
   ring.velocities[p + 2] = vz;
   ring.ages[i] = 0;
   ring.lifetimes[i] = life;
+  ring.birthSizes[i] = size;
   ring.sizes[i] = size;
-  ring.alphas[i] = 1;
+  ring.alphas[i] = ring.envelope === 'smoke' ? 0 : 1;
+  ring.seeds[i] = seed;
   return i;
 }
 
@@ -70,7 +80,8 @@ export function emit(ring, x, y, z, vx, vy, vz, life, size) {
 export function advance(ring, dt) {
   if (!(dt > 0)) return ring.live;
   const decay = Math.exp(-ring.drag * dt);
-  const { positions, velocities, ages, lifetimes, sizes, alphas } = ring;
+  const { positions, velocities, ages, lifetimes, sizes, birthSizes, alphas, seeds } = ring;
+  const smoke = ring.envelope === 'smoke';
   let live = 0;
   for (let i = 0; i < ring.count; i++) {
     if (lifetimes[i] <= 0) continue;
@@ -86,10 +97,23 @@ export function advance(ring, dt) {
     velocities[p] *= decay;
     velocities[p + 1] = velocities[p + 1] * decay + ring.gravity * dt;
     velocities[p + 2] *= decay;
+    // Cheap curl: a lateral wobble keyed to seed so the plume does not rise as
+    // a straight chimney. Magnitude falls with drag so it settles into haze.
+    if (smoke) {
+      const wobble = Math.sin(ages[i] * (2.1 + seeds[i] * 3.4) + seeds[i] * 6.28) * 0.55;
+      velocities[p] += wobble * dt;
+      velocities[p + 2] += Math.cos(ages[i] * (1.7 + seeds[i] * 2.2)) * 0.45 * dt;
+    }
     positions[p] += velocities[p] * dt;
     positions[p + 1] += velocities[p + 1] * dt;
     positions[p + 2] += velocities[p + 2] * dt;
-    alphas[i] = 1 - ages[i] / lifetimes[i];
+    const t = ages[i] / lifetimes[i];
+    if (smoke) {
+      alphas[i] = smokeAlpha(t);
+      sizes[i] = birthSizes[i] * smokeSizeScale(t, ring.expand);
+    } else {
+      alphas[i] = 1 - t;
+    }
     live++;
   }
   ring.live = live;
@@ -113,7 +137,7 @@ export function createBudget() {
  *
  * Capped, because a long frame must not empty the whole ring in one go.
  */
-export const MAX_PER_FRAME = 40;
+export const MAX_PER_FRAME = 64;
 
 export function takeBudget(budget, amount) {
   if (!(amount > 0)) return 0;
