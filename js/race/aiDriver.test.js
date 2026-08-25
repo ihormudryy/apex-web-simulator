@@ -72,20 +72,28 @@ test('every difficulty completes a lap without leaving the road', () => {
 });
 
 test('each difficulty gets close to its own top speed on this circuit', () => {
-  // The bug this guards against: an earlier version rescaled `level.topSpeed`
-  // itself by the cornering ratio instead of only the curvature-derived term,
-  // so a level's straight-line cap was silently clipped down too. That was
-  // invisible to the other tests here, because all three levels still scaled
-  // down together and kept their relative order. Thresholds are set below
-  // the measured post-fix fraction of `topSpeed` reached on Silverstone's
-  // straights (club 100%, pro 95%, ace 88% — see the DIFFICULTY doc comment
-  // in aiDriver.js for the full measurement and why `ace` alone tops out
-  // under 90%: its `topSpeed` sits above the corner-scaled ceiling the
-  // planner's own nearest-station lookahead already imposes, a genuine
-  // property of the circuit and the driver model, not a bug), with margin
-  // for run-to-run noise but tight enough to catch the same class of
-  // regression: the pre-fix numbers were club 79%, pro 88%.
-  const minFraction = { club: 0.90, pro: 0.90, ace: 0.75 };
+  // The bug this guards against had two layers, both in the speed planner:
+  // first, rescaling `level.topSpeed` itself by a cornering ratio (fixed);
+  // then, deriving corner speed from `line.speed`, which bakes in the racing
+  // line's OWN 92 m/s constant on every straight and got the same cornering
+  // ratio applied to it — a second instance of the same category error one
+  // level down (also fixed: the planner now derives corner speed from
+  // `line.curvature` and this level's own `latG`/`topSpeed`, never touching
+  // `line.speed`). Both were invisible to the other tests here, because all
+  // three levels still scaled down together and kept their relative order.
+  //
+  // Thresholds are set below the measured fraction of `topSpeed` reached
+  // AFTER both fixes (club 100.1%, pro 94.7%, ace 88.2% — see the
+  // DIFFICULTY doc comment in aiDriver.js), not below the bug's own output:
+  // the round-1 thresholds were picked with margin under an 88% for `ace`
+  // that was itself still suppressed by the second bug, so they would have
+  // passed even a partial regression back toward it. These were checked
+  // against a genuinely correct measurement instead — raising `topSpeed`
+  // far past 92 for `pro` and `ace` left the speed each one actually reached
+  // unchanged, confirming neither is bottlenecked by any leftover scaling
+  // defect; the ~10-12 percentage-point gap from 100% is Silverstone's
+  // straight length and the car's own acceleration curve, not tunable away.
+  const minFraction = { club: 0.95, pro: 0.90, ace: 0.85 };
   for (const id of DIFFICULTY_ORDER) {
     const r = runLaps(id, 420);
     const fraction = r.topSpeed / DIFFICULTY[id].topSpeed;
