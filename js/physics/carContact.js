@@ -38,6 +38,34 @@
  * documents for the wall case. The fix is the same one it uses: gather every
  * overlapping corner pair and run several velocity passes over all of them,
  * so the two sides' torques converge to cancelling out.
+ *
+ * WARNING for whoever next edits the impulse math: energy and linear-momentum
+ * conservation do NOT constrain the rotational (av) term. A code-review fault
+ * injection confirmed this directly — flipping the sign of just one body's
+ * `SB[S_AV] += j * rbCrossN / IZ` (a one-line, plausible rotational bug,
+ * confined to a single body) left BOTH `contact never adds kinetic energy`
+ * (the full 16-case grid, repeated) and `linear momentum is conserved`
+ * passing. Linear momentum structurally cannot catch this class of bug at
+ * all — it never reads av. Energy happened to catch it in some configurations
+ * here but is not a reliable gate for it. What did catch it: the
+ * argument-order symmetry test, the glancing-vs-square comparison, and
+ * `angular momentum about the origin is conserved by the velocity solve`
+ * (carContact.test.js) — a genuinely independent invariant, since two
+ * equal-and-opposite impulses applied at the same point conserve angular
+ * momentum about any fixed point regardless of the impulse's own correctness
+ * in every other respect. If you touch the impulse formula, those three must
+ * stay green; do not treat energy conservation alone as sufficient proof the
+ * rotational term is still correct.
+ *
+ * The centre-to-centre normal (above) is a deliberate approximation, and it
+ * is at its least accurate for a near-perpendicular hit: for a true T-bone,
+ * the physically correct local contact normal is closer to the struck
+ * panel's own normal (roughly the wall-hit case's lateral normal) than to the
+ * line between the two centres. carContact.test.js's side-on case only checks
+ * the invariants that must hold under ANY valid normal — no energy created,
+ * momentum conserved, cars end up more separated than they started — not that
+ * the specific outcome is what a T-bone should physically look like. Exact
+ * T-bone panel contact is out of scope here.
  */
 
 import { MASS, IZ } from './constants.js';
