@@ -236,10 +236,19 @@ export class Track extends THREE.Group {
    * The normal comes from central differences of the same height function, so the
    * surface the tyre feels and the surface it is standing on are the same surface
    * by construction rather than by agreement.
+   *
+   * `hint` defaults to the instance cursor, so every existing three-argument call
+   * site is untouched. A caller keeping several cars on the same track passes its
+   * own cursor instead — sharing this one cursor between cars spread round the lap
+   * measured ~15% slower per car, dragged back and forth between them, and is the
+   * aliasing failure `centerline.query` warns about in its own comments. The
+   * station this settles on is published on `out.index`, so such a caller can
+   * advance its own cursor without paying for a second ring search.
    */
-  queryWheel(x, z, out) {
-    const q = this.centerline.query(x, z, this._wheelHint);
+  queryWheel(x, z, out, hint = this._wheelHint) {
+    const q = this.centerline.query(x, z, hint);
     this._wheelHint = q.index;
+    out.index = q.index;
     out.surface = q.surface;
     out.mu = MU[q.surface] ?? MU.grass;
     out.height = this._terrainHeight(q);

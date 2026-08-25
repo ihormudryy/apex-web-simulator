@@ -1138,9 +1138,23 @@ export class Car {
   }
 
   updatePhysics(dt, track) {
-    const v = this.vehicle;
+    advance(this.vehicle, this.input, track, dt);
+    this.render(track, dt);
+  }
+
+  /**
+   * Draw the current vehicle state onto the meshes: wheels, attitude, tyre
+   * squash, effects. Split out of `updatePhysics` so a car whose physics is
+   * stepped elsewhere can still be drawn through the same pipeline the
+   * player's car uses — `raceField.js` advances every car on the grid
+   * together in one place, because contact resolution needs both cars'
+   * post-step state in the same frame, which rules out each car stepping
+   * itself independently. `vehicle` defaults to `this.vehicle`, so this split
+   * is invisible to `updatePhysics` above, the one caller that existed before it.
+   */
+  render(track, dt, vehicle = this.vehicle) {
+    const v = vehicle;
     this._track = track;
-    advance(v, this.input, track, dt);
 
     if (!this._fx) {
       this._fx = createCarEffects(this._scene, {

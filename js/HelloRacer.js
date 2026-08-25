@@ -60,6 +60,7 @@ import {
   setPose, resetVehicle, createVehicle, replayStep, renderPose, telemetryOf,
 } from './physics/vehicle.js';
 import { resetGhost as resetGhostState } from './physics/ghost.js';
+import { createRaceField, stepField, resetField, gridPose } from './race/raceField.js';
 import { GroundedSkybox } from 'three/addons/objects/GroundedSkybox.js';
 
 const SKY_COLOR = 0xa8d6ff;
@@ -107,6 +108,8 @@ class HelloRacer {
     this.stats = null;
 
     this.car = null;
+    this.rivalCar = null;
+    this.field = null;
     this.track = null;
     this.dashboard = null;
     this.controlHints = null;
@@ -302,13 +305,29 @@ class HelloRacer {
 
     this._loadEnvironment();
 
+    // The race field: every car on track, stepped together. The player is entry
+    // 0, driven by the keyboard instead of `driveAi` — see raceField.js's header.
+    this.field = createRaceField(this.track, { rivals: 1, level: 'pro', physicsMode: this.physicsMode });
+
     this.car = new Car(this.scene, {
       backend: this._rendererBackend,
       physicsMode: this.physicsMode,
     });
+    // The field, not the freshly-constructed `Car`, owns the player's physics —
+    // `stepField` advances every entry together so car-to-car contact resolves
+    // against both cars' post-step state in the same frame. `Car` becomes a view
+    // onto whichever vehicle it is pointed at; see `_syncFieldVehicle`.
+    this.car.vehicle = this.field.entries[0].vehicle;
     // Materials that explicitly receive `envMap` need it wired in; otherwise
     // dielectrics go unnaturally dark (no ambient IBL).
     this.car.loadAssets(this._envMap);
+
+    this.rivalCar = new Car(this.scene, {
+      backend: this._rendererBackend,
+      physicsMode: this.physicsMode,
+    });
+    this.rivalCar.loadAssets(this._envMap);
+
     this._placeCarOnTrack();
     const topRight = ensureTopRightStack(container);
     this._mountRenderPanel(topRight);
@@ -528,6 +547,7 @@ class HelloRacer {
     writeStoredPhysicsMode(mode);
     const setup = this.setup ?? defaultSetup();
     this.car.rebuild(setup, { physicsMode: mode });
+    this._syncFieldVehicle();
     this.car.vehicle.recorder = this.ghost.current;
     this.ghostCar = createVehicle({ physicsMode: mode });
     this._placeCarOnTrack();
@@ -1110,21 +1130,24 @@ class HelloRacer {
   }
 
   /**
-   * The kernel's flat state vector is authoritative, and `v.vx` and friends are
-   * copies made once a frame. Clearing the copies by hand left the real state
-   * untouched, so a reset car drove off with the velocity it had before.
+   * `Car.rebuild` (setup changes, physics-mode changes) replaces `this.car.vehicle`
+   * with a freshly-created one. Without this, the field would keep stepping the
+   * old vehicle object — unbuilt, unrendered — while the visible car quietly
+   * stopped being driven by anything.
    */
-  _zeroVehicle(v) {
-    resetVehicle(v, this.track);
+  _syncFieldVehicle() {
+    this.field.entries[0].vehicle = this.car.vehicle;
   }
 
+  /** Both cars back to their grid slots. `field` is the single source of pose. */
   _placeCarOnTrack() {
-    const s = this.track.spawn();
-    const yaw = Math.atan2(-s.tx, -s.tz);
-    this.car.root.position.set(s.x, 0, s.z);
-    this.car.root.rotation.y = yaw;
-    setPose(this.car.vehicle, s.x, s.z, yaw, this.track);
-    this._zeroVehicle(this.car.vehicle);
+    resetField(this.field, this.track);
+    const cars = [this.car, this.rivalCar];
+    for (let i = 0; i < cars.length; i++) {
+      const p = gridPose(this.track, i);
+      cars[i].root.position.set(p.x, 0, p.z);
+      cars[i].root.rotation.y = p.yaw;
+    }
   }
 
   _clearCarForGridReset() {
@@ -1169,6 +1192,7 @@ class HelloRacer {
     this._clearCarForGridReset();
     this._placeCarOnTrack();
     this.car.restoreMeshDamage();
+    this.rivalCar.restoreMeshDamage();
     this._launched = false;
     if (this.telemetry?.reset) this.telemetry.reset();
     this._chaseReady = false;
@@ -1220,8 +1244,13 @@ class HelloRacer {
     this._tickQualityScaler(rawMs);
 
     this._checkLaunch();
-    this.car.updateSteering(dt);
-    this.car.updatePhysics(dt, this.track);
+    // Every car on the grid, stepped together — contact resolves against both
+    // cars' post-step state in the same frame, which a car stepping itself
+    // independently could not do. The player's keyboard state feeds in here
+    // instead of `this.car.updateSteering`/`updatePhysics` driving it alone.
+    stepField(this.field, this.car.input, this.track, dt);
+    this.car.render(this.track, dt);
+    this.rivalCar.render(this.track, dt, this.field.entries[1].vehicle);
     // The car's effect set is built on its first physics frame, so the handover of
     // the tyre-mark texture to the asphalt happens here rather than at setup.
     if (!this._marksConnected && this.car.tyreMarkTexture) {
@@ -1345,6 +1374,7 @@ class HelloRacer {
   _applySetup(setup) {
     this.setup = setup;
     this.car.rebuild(setup, { physicsMode: this.physicsMode });
+    this._syncFieldVehicle();
     this.car.vehicle.recorder = this.ghost.current;
     this._placeCarOnTrack();
     this.telemetry.reset?.();
