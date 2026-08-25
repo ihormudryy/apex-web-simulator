@@ -61,6 +61,11 @@ import {
 } from './physics/vehicle.js';
 import { resetGhost as resetGhostState } from './physics/ghost.js';
 import { createRaceField, stepField, resetField, gridPose } from './race/raceField.js';
+import {
+  createStartLights, armStartLights, resetStartLights, advanceStartLights,
+  startInputLocked, jumpStartExpired,
+} from './race/startLights.js';
+import { StartLightsHud } from './dash/StartLightsHud.js';
 import { GroundedSkybox } from 'three/addons/objects/GroundedSkybox.js';
 
 const SKY_COLOR = 0xa8d6ff;
@@ -100,6 +105,30 @@ const SKYBOX_RADIUS = 2200;
 const SKYBOX_GROUND_Y = -0.35;
 const SKYBOX_Y = SKYBOX_HEIGHT + SKYBOX_GROUND_Y;
 
+/**
+ * Minimal seeded PRNG (mulberry32) for the start-lights hold.
+ *
+ * `Math.random` cannot be seeded, so a ghost/replay could never reproduce the
+ * hold it drew. `createStartLights` takes any `() => number`, so handing it
+ * one of these seeded from wall-clock entropy gives a hold that is as
+ * unpredictable to the driver as `Math.random` was, while still being a pure
+ * function of a seed a replay could pin down.
+ */
+function seededRng(seed) {
+  let s = seed >>> 0;
+  return function () {
+    s |= 0; s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** A seed only wall-clock timing could reproduce — fresh, unlearnable, per race. */
+function newRaceSeed() {
+  return (Date.now() ^ Math.floor(performance.now() * 1000)) >>> 0;
+}
+
 class HelloRacer {
   constructor() {
     this.scene = null;
@@ -114,6 +143,8 @@ class HelloRacer {
     this.dashboard = null;
     this.controlHints = null;
     this.credits = null;
+    this.startLights = null;
+    this.startLightsHud = null;
     this._launched = false;
     this.telemetry = null;
     this._camRadius = CHASE_DISTANCE;
@@ -308,6 +339,10 @@ class HelloRacer {
     // The race field: every car on track, stepped together. The player is entry
     // 0, driven by the keyboard instead of `driveAi` — see raceField.js's header.
     this.field = createRaceField(this.track, { rivals: 1, level: 'pro', physicsMode: this.physicsMode });
+    // Both cars sit on the grid, held, until the player arms the lights — see
+    // _armStart, and startLights.js's header for why the RNG is seeded here
+    // rather than left on the module's Math.random default.
+    this.startLights = createStartLights(seededRng(newRaceSeed()));
 
     this.car = new Car(this.scene, {
       backend: this._rendererBackend,
@@ -338,6 +373,7 @@ class HelloRacer {
     this.dashboard = new Dashboard(container, this.track, { circuitName: DEFAULT_CIRCUIT_NAME });
     this.controlHints = new ControlHints(container);
     this.credits = new CreditsPanel(container);
+    this.startLightsHud = new StartLightsHud(container, { onArm: () => this._armStart() });
     this._mountModLoader(container);
 
     // Setup screen. Applying one rebuilds the car, because half of a setup lives in
@@ -1204,14 +1240,26 @@ class HelloRacer {
    * The run starts when the driver does: the lap clock is re-zeroed on the
    * first throttle after a grid reset, so it reads driving time rather than
    * however long the car sat parked.
+   *
+   * Guarded on the lights so a throttle press while held — idle, mid-
+   * sequence, or a jump start awaiting its verdict — doesn't zero the clock
+   * before the car is actually free to move; `startInputLocked` covers all
+   * three. The real launch press, the one that survives, arrives once the
+   * lock lifts at lights out.
    */
   _checkLaunch() {
     if (this._launched) return;
+    if (this.startLights && startInputLocked(this.startLights)) return;
     const input = this.car.input;
     if (input.forward || input.reverse) {
       this._launched = true;
       this.telemetry.reset?.();
     }
+  }
+
+  /** The player is ready. Called from the START button; does nothing off the grid. */
+  _armStart() {
+    if (this.startLights) armStartLights(this.startLights);
   }
 
   _resetRace() {
@@ -1220,6 +1268,9 @@ class HelloRacer {
     this.car.restoreMeshDamage();
     this.rivalCar.restoreMeshDamage();
     this._launched = false;
+    // A genuinely new race: fresh seed, so this race's hold is unrelated to
+    // the last one's — see startLights.js's header on why the seed lives here.
+    this.startLights = createStartLights(seededRng(newRaceSeed()));
     if (this.telemetry?.reset) this.telemetry.reset();
     this._chaseReady = false;
     this._followYaw = this.car.root.rotation.y;
@@ -1269,7 +1320,20 @@ class HelloRacer {
     this._lastTime = now;
     this._tickQualityScaler(rawMs);
 
+    // The start procedure: idle until armed from the HUD button, then the
+    // gantry sequence, then lights out — or a jump start back to idle. Advance
+    // it before the field steps so `field.locked` reflects this frame's phase,
+    // and `stepField` (see raceField.js) is the single gate holding BOTH cars
+    // on the grid, rival included, so the rival cannot creep off early either.
+    const throttlePressed = Boolean(this.car.input.forward || this.car.input.reverse);
+    advanceStartLights(this.startLights, dt, throttlePressed);
+    if (jumpStartExpired(this.startLights)) {
+      resetField(this.field, this.track);
+      resetStartLights(this.startLights);
+    }
+    this.field.locked = startInputLocked(this.startLights);
     this._checkLaunch();
+    this.startLightsHud?.update(this.startLights);
     // Every car on the grid, stepped together — contact resolves against both
     // cars' post-step state in the same frame, which a car stepping itself
     // independently could not do. The player's keyboard state feeds in here
