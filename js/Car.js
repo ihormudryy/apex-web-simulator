@@ -1149,8 +1149,19 @@ export class Car {
    * player's car uses — `raceField.js` advances every car on the grid
    * together in one place, because contact resolution needs both cars'
    * post-step state in the same frame, which rules out each car stepping
-   * itself independently. `vehicle` defaults to `this.vehicle`, so this split
-   * is invisible to `updatePhysics` above, the one caller that existed before it.
+   * itself independently.
+   *
+   * The wheels are why this cannot be skipped for such a car: `_makeWheel`
+   * parents `lfw`/`rfw`/`lrw`/`rrw` under `this.root`, so they move as a
+   * group with it for free, but each wheel's OWN local offset — the four
+   * corners, the suspension travel, the squash drop — is written by
+   * `wheelRootPosition` fresh every frame, right here. A car that never
+   * calls this stays at the local position `_makeWheel` constructed it
+   * with, `(0, 0, 0)`: all four wheels collapsed onto the chassis origin,
+   * not spread to the car's four corners.
+   *
+   * `vehicle` defaults to `this.vehicle`, so this split is invisible to
+   * `updatePhysics` above, the one caller that existed before it.
    */
   render(track, dt, vehicle = this.vehicle) {
     const v = vehicle;

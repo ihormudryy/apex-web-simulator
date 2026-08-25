@@ -83,7 +83,12 @@ export function gridPose(track, slot) {
   };
 }
 
-export function createRaceField(track, { rivals = 1, level = 'pro', physicsMode = 'arcade' } = {}) {
+export function createRaceField(track, {
+  rivals = 1, level = 'pro', physicsMode = 'arcade',
+  // Overridable so a test can count resolutions per step without reaching
+  // into the module's imports — see raceField.test.js's contact-count test.
+  resolveContact = resolveCarContact,
+} = {}) {
   const line = buildRacingLine(track.centerline.samples);
   const entries = [];
   for (let slot = 0; slot < rivals + 1; slot++) {
@@ -108,7 +113,10 @@ export function createRaceField(track, { rivals = 1, level = 'pro', physicsMode 
       finishTime: 0,
     });
   }
-  return { entries, line, laps: RACE_LAPS, contact: createCarContact(), locked: false };
+  return {
+    entries, line, laps: RACE_LAPS, contact: createCarContact(), locked: false,
+    resolveContact,
+  };
 }
 
 export function resetField(field, track) {
@@ -195,7 +203,7 @@ export function stepField(field, playerInput, track, dt) {
   // Contact: every unordered pair exactly once.
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      resolveCarContact(field.entries[i].vehicle.S, field.entries[j].vehicle.S, field.contact);
+      field.resolveContact(field.entries[i].vehicle.S, field.entries[j].vehicle.S, field.contact);
     }
   }
 

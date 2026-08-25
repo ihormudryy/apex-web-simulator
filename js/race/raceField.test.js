@@ -99,3 +99,39 @@ test('resetField puts both cars back on the grid', () => {
     assert.equal(field.entries[i].finished, false);
   }
 });
+
+// The five tests above never isolate the contact count: they'd still pass if
+// every pair were resolved twice, or a car were paired against itself. This
+// pins the loop's actual shape — N(N-1)/2 calls, each an unordered pair
+// exactly once — by counting and identifying real resolutions through an
+// injected stub, so a later "helpful" rewrite to a symmetric i/j loop (or a
+// duplicate call) fails loudly here instead of quietly doubling contact
+// response for the whole field.
+test('contact resolves exactly once per unordered pair, for 2 and for 3 cars', () => {
+  const track = circuit();
+  const input = noInput();
+
+  const countPairs = rivals => {
+    // `resolveContact` is a plain property on the returned field, not baked
+    // into a closure, so it can be swapped for a counting stub after the
+    // field (and its vehicles' identity) exists.
+    const field = createRaceField(track, { rivals, level: 'pro' });
+    const indexOf = new Map(field.entries.map((e, i) => [e.vehicle.S, i]));
+    const seen = new Set();
+    let calls = 0;
+    field.resolveContact = (SA, SB, out) => {
+      calls++;
+      assert.notEqual(SA, SB, 'a car must never be paired against itself');
+      const a = indexOf.get(SA), b = indexOf.get(SB);
+      const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+      assert.ok(!seen.has(key), `pair ${key} resolved more than once in one step`);
+      seen.add(key);
+      return out;
+    };
+    stepField(field, input, track, DT);
+    return calls;
+  };
+
+  assert.equal(countPairs(1), 1); // 2 cars -> C(2,2) = 1 pair
+  assert.equal(countPairs(2), 3); // 3 cars -> C(3,2) = 3 pairs
+});

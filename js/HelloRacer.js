@@ -548,6 +548,7 @@ class HelloRacer {
     const setup = this.setup ?? defaultSetup();
     this.car.rebuild(setup, { physicsMode: mode });
     this._syncFieldVehicle();
+    this._rebuildRivalVehicles(mode);
     this.car.vehicle.recorder = this.ghost.current;
     this.ghostCar = createVehicle({ physicsMode: mode });
     this._placeCarOnTrack();
@@ -1137,6 +1138,31 @@ class HelloRacer {
    */
   _syncFieldVehicle() {
     this.field.entries[0].vehicle = this.car.vehicle;
+  }
+
+  /**
+   * Rebuild every RIVAL's vehicle onto a new physics mode.
+   *
+   * `physicsMode` is not personal the way a car setup is — it is a global
+   * fidelity toggle, baked into `createVehicle` at construction (grip scale
+   * and tyre behaviour both come from `physicsPreset(physicsMode)`; see
+   * physics/vehicle.js and physics/physicsMode.js). Leaving a rival on the
+   * old preset after a mode switch would race it under different grip from
+   * the player while the two share one contact solver — exactly the
+   * asymmetry the field exists to rule out: the AI is supposed to drive the
+   * same car the player does, not a car tuned differently underneath it.
+   *
+   * `_applySetup` deliberately does NOT call this: a setup is the player's
+   * own customisation of their own car, not something a rival should ever
+   * inherit. Do not "fix" that by making setup global too — it is global-vs-
+   * personal that decides which of these two mirrors the player and which
+   * does not, not a shared code path either forgot.
+   */
+  _rebuildRivalVehicles(mode) {
+    for (const e of this.field.entries) {
+      if (e.isPlayer) continue;
+      e.vehicle = createVehicle({ physicsMode: mode });
+    }
   }
 
   /** Both cars back to their grid slots. `field` is the single source of pose. */
