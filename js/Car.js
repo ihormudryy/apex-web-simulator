@@ -746,7 +746,13 @@ export class Car {
 
     for (const [name, p] of Object.entries(bodyParts)) {
       BinLoader.load(`obj/js/${name}.bin`, geo => {
-        const mesh = new THREE.Mesh(geo, p.mat);
+        // BinLoader hands out one shared geometry instance per url so that
+        // every car on track reuses the same GPU buffers. BodyPaint is the
+        // one part this class deforms in place (see _applyMeshDamage below),
+        // so it alone must be cloned here — otherwise damaging one car's
+        // wing would deform and re-light every other car sharing this url.
+        const partGeo = name === 'BodyPaint' ? geo.clone() : geo;
+        const mesh = new THREE.Mesh(partGeo, p.mat);
         mesh.position.set(p.x, p.y, p.z);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
@@ -755,10 +761,10 @@ export class Car {
         // rather than a second load of the same file — and for visible damage,
         // which deforms this geometry's wing region in place.
         if (name === 'BodyPaint') {
-          this._bodyGeometry = geo;
+          this._bodyGeometry = partGeo;
           this._bodyOffset = { x: p.x, y: p.y, z: p.z };
           this._paintMesh = mesh;
-          const pos = geo.attributes.position;
+          const pos = partGeo.attributes.position;
           this._paintBase = new Float32Array(pos.array);
           this._wingRegions = wingWeights(this._paintBase, pos.count);
         }
