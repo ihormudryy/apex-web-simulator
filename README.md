@@ -57,7 +57,36 @@ WebGPU is the default. Use `?renderer=webgl` or the **Render → WebGPU** toggle
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). This covers the code. The world is built from
+third-party data and assets under their own licences; see Credits.
+
+## Credits and data attribution
+
+The circuit geometry is derived from open survey data, and crediting it is a
+licence obligation rather than a courtesy. The same list is shown in-app,
+bottom-right.
+
+> Map data © OpenStreetMap contributors, ODbL
+
+| Part | Source | Licence |
+|---|---|---|
+| Circuit centerline and track widths | [TUMFTM racetrack-database](https://github.com/TUMFTM/racetrack-database) | LGPL-3.0 |
+| Survey traces underlying that centerline | [OpenStreetMap contributors](https://www.openstreetmap.org/copyright) | ODbL |
+| Georeferencing cross-check for the grid | [bacinger/f1-circuits](https://github.com/bacinger/f1-circuits) | MIT |
+| Sky HDRI, grass normal and roughness maps | [Poly Haven](https://polyhaven.com) | CC0 |
+| Placeholder car and driver meshes | [HelloRacer WebGL demo](https://helloracer.com/webgl/) | Demo art — replace before shipping publicly |
+| Renderer | [three.js](https://threejs.org) | MIT |
+
+The TUMFTM centerline is fetched from OpenStreetMap traces, so it is arguably an
+ODbL derivative regardless of its LGPL label — OpenStreetMap is credited on both
+counts. The rendered scene is a *Produced Work* under ODbL, so attribution and a
+licence notice are what is required; share-alike attaches to derivative
+*databases*, and `js/track/silverstoneSurvey.js` — the extracted centerline —
+stays open in this repo. Its header carries the full provenance, including the
+pinned upstream commit and every transformation applied.
+
+`obj/cars/` shells are user-supplied CC-BY assets and are gitignored; attribute
+them yourself if you redistribute a build that includes them.
 
 ## Livery
 

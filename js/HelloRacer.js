@@ -22,6 +22,7 @@ import {
 } from './render/chassisCamera.js';
 import { Dashboard } from './dash/Dashboard.js';
 import { ControlHints } from './dash/ControlHints.js';
+import { CreditsPanel } from './dash/CreditsPanel.js';
 import { createTelemetry } from './dash/telemetry.js';
 import { SetupPanel } from './dash/setupPanel.js';
 import { PhysicsModePanel, ensureTopRightStack } from './dash/PhysicsModePanel.js';
@@ -109,6 +110,7 @@ class HelloRacer {
     this.track = null;
     this.dashboard = null;
     this.controlHints = null;
+    this.credits = null;
     this._launched = false;
     this.telemetry = null;
     this._camRadius = CHASE_DISTANCE;
@@ -316,6 +318,7 @@ class HelloRacer {
     this.telemetry = createTelemetry({ lapLength: this.track.centerline.length });
     this.dashboard = new Dashboard(container, this.track, { circuitName: DEFAULT_CIRCUIT_NAME });
     this.controlHints = new ControlHints(container);
+    this.credits = new CreditsPanel(container);
     this._mountModLoader(container);
 
     // Setup screen. Applying one rebuilds the car, because half of a setup lives in
@@ -1103,6 +1106,7 @@ class HelloRacer {
   _toggleHud() {
     this.dashboard.toggle();
     this.controlHints.setVisible(this.dashboard.visible);
+    this.credits?.setVisible(this.dashboard.visible);
   }
 
   /**
