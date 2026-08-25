@@ -72,22 +72,67 @@
  * of magnitudes barely changes — which is exactly what cutting an apex does
  * physically (a bigger effective radius through the tightest point), and is
  * also the number that maps directly to peak lateral g and thus corner
- * speed, which is what this line is *for*. Measured at 60,000 sweeps,
- * `STEP = 0.02`: Σ curvature² settles to 88.3% of the flat centerline's, and
- * peak curvature (the number that sets minimum corner speed) settles to
- * 85.9% of the flat centerline's, with the line converging to 5887 m (vs.
- * 5891 m flat) and no further drift after that point — the earlier
- * per-station formula's instability does not reappear here because this is
- * genuine gradient descent on a convex objective with a step size inside
- * its stability bound.
+ * speed, which is what this line is *for*.
+ *
+ * WHY 60,000 SWEEPS, NOT MORE — AND NOT "UNTIL IT CONVERGES".
+ * 60,000 is a chosen budget, not a converged optimum, and an earlier draft
+ * of this comment wrongly claimed otherwise ("settles... no further change
+ * out to 100,000"). It doesn't settle. Measured trajectory, `STEP = 0.02`,
+ * (sweeps: Σk² ratio / peak-curvature ratio, both vs. the flat centerline):
+ *
+ *     60,000:    0.883 / 0.859
+ *     100,000:   0.866 / 0.874
+ *     400,000:   0.825 / 0.944
+ *     1,600,000: 0.798 / 0.949
+ *
+ * Σk² keeps falling the whole way — the offset field keeps finding lower
+ * total squared curvature out past a million and a half sweeps. But PEAK
+ * curvature — the number that actually sets minimum corner speed — gets
+ * *worse* past roughly 60,000, because the objective is happy to buy a
+ * lower sum by flattening already-gentle stretches while the tightest
+ * point drifts back up. Stopping at 60,000 is not an arbitrary round
+ * number; it is where the metric that matters for lap time is at its best
+ * measured value, even though the metric the optimiser is directly
+ * descending keeps improving. Running longer looks better on paper (lower
+ * Σk²) and drives worse.
+ *
+ * WHAT THIS ACTUALLY BUYS: 10.3 SECONDS A LAP, FROM SMOOTHING, NOT CUTTING.
+ * On a wide-corridor, gentle-radius circuit this line barely visibly cuts
+ * apexes. Silverstone's corridor here is roughly ±5 m against corner radii
+ * of 20–200 m, so there is little geometric room to re-route through a
+ * corner, and mean |offset| over the lap is a few centimetres (see
+ * `racingLine.test.js`, which pins this as the expected outcome on this
+ * geometry, not a shortfall). That smallness looks unimpressive but is not
+ * the same as "did nothing": a quasi-static lap-time estimate (Menger
+ * curvature per station → cornering-speed limit → backward braking pass →
+ * forward traction pass, at 1.6 lateral / 1.8 braking / 0.9 acceleration g,
+ * 92 m/s cap — no driver model involved) gives:
+ *
+ *     centerline    133.74 s   length 5891 m   slowest corner 17.9 m/s
+ *     racing line   123.40 s   length 5887 m   slowest corner 19.0 m/s
+ *
+ * 10.34 s a lap quicker — 7.73% — entirely from the 14% reduction in peak
+ * curvature raising the slowest corner's speed from 17.9 to 19.0 m/s.
+ * (Sanity check: 133.74 s sits right next to the ~131 s flat-out figure
+ * already recorded in `lap.test.js`.) On this corridor essentially all of
+ * the available lap time comes from smoothing rather than re-routing — a
+ * line that visibly cuts apexes was measured and rejected precisely because
+ * it is slower: decimating the relaxation to 200–400 stations and
+ * interpolating the offsets back up does produce a dramatic-looking line
+ * (mean |offset| 3–4 m) that cuts hard toward the barrier, but its peak
+ * curvature comes out ~2.3–2.5× *worse* — it buys a wide radius through
+ * most of the corner at the cost of a much tighter transition at the ends,
+ * the same wall-riding trade-off described above in miniature, and by the
+ * lap-time estimate above it would be slower, not faster. If a future
+ * circuit's geometry makes a visibly apex-cutting line actually worth more
+ * than this one, the right tool is a real constrained solver with
+ * arc-length reparameterisation, not more tuning of this relaxation — that
+ * road has already been walked on this circuit and it leads backwards.
  *
  * 60,000 sweeps at 4000 stations measures ~0.8 s cold and ~2.1 s for a
  * repeat call in the same process (V8 JIT variance across fresh closures;
  * not investigated further since both are well inside the "seconds, not
- * ten seconds" budget for a one-time load-time computation). If a future
- * circuit needs this faster, decimating the station set for the relaxation
- * and interpolating the offsets back up is the next lever, not raising the
- * step size past its stability bound.
+ * ten seconds" budget for a one-time load-time computation).
  *
  * Generated rather than shipped: TUMFTM publishes a real optimiser raceline,
  * but it is keyed to the *surveyed* geometry while our centerline was
@@ -118,10 +163,12 @@ export const CORRIDOR_MARGIN = HALF_WIDTH + 0.35;
  */
 const STEP = 0.02;
 /**
- * Sweeps to run. Measured convergence at `STEP = 0.02`: Σ curvature² settles
- * to 88.3% of the flat centerline's and peak curvature to 85.9%, both flat
- * by 60,000 sweeps (no further change out to 100,000). Costs ~1–2 s at 4000
- * stations — see module header if a future circuit needs this faster.
+ * Sweeps to run. This is a chosen stopping point, not a converged value —
+ * see "WHY 60,000 SWEEPS" in the module header for the measured trajectory
+ * out to 1.6M sweeps. Peak curvature (what sets minimum corner speed) is at
+ * its best around here; total squared curvature keeps falling well past it,
+ * which is exactly why sweep count alone can't be tuned further without
+ * making the line worse where it counts. Costs ~1–2 s at 4000 stations.
  */
 const DEFAULT_ITERATIONS = 60000;
 /**
@@ -243,17 +290,32 @@ export function lineCurvatureTotal(line) {
   return sum;
 }
 
+/** Stations either side of the hint the windowed search in `nearestOnLine` covers. */
+const NEAREST_WINDOW = 90;
+
 /** Nearest station on the line to a world point, searching from a hint. */
 export function nearestOnLine(line, qx, qz, hint = 0) {
   const n = line.x.length;
   let best = hint, bestD2 = Infinity;
-  for (let d = -90; d <= 90; d++) {
+  for (let d = -NEAREST_WINDOW; d <= NEAREST_WINDOW; d++) {
     const i = ((hint + d) % n + n) % n;
     const dx = line.x[i] - qx, dz = line.z[i] - qz;
     const d2 = dx * dx + dz * dz;
     if (d2 < bestD2) { bestD2 = d2; best = i; }
   }
-  if (bestD2 > 2500) {
+  // The windowed search above only *proves* it found the true nearest
+  // station when the answer it found is closer than the window itself
+  // spans — `NEAREST_WINDOW` stations at the line's own spacing covers
+  // `NEAREST_WINDOW * line.spacing` metres of arc to either side of the
+  // hint, so anything found within that radius can't have a closer
+  // competitor hiding just outside the window. A hardcoded metre figure
+  // here would silently stop matching the window once either constant
+  // changed; deriving it from both keeps them honest with each other.
+  // Beyond that radius (e.g. a stale hint left over from across a hairpin,
+  // or the first call ever with the default hint of 0) fall back to a full
+  // scan — it costs O(n) but only runs when the fast path can't be trusted.
+  const safeRadius = NEAREST_WINDOW * line.spacing;
+  if (bestD2 > safeRadius * safeRadius) {
     for (let i = 0; i < n; i++) {
       const dx = line.x[i] - qx, dz = line.z[i] - qz;
       const d2 = dx * dx + dz * dz;
