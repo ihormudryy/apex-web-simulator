@@ -10,13 +10,15 @@
  * a jump start (or any other reset) drops the state back to `idle` so it
  * takes another press to go again.
  *
- * The hold has to stay unlearnable, which means real randomness, but a ghost
- * or replay (physics/ghost.js, physics/replay.js) demands the exact same race
- * reproduce bit-for-bit. Both are true at once because the RNG is a caller-
- * supplied function: seed it fresh (e.g. from wall-clock entropy) per race for
- * play, and hand in a fixed seed to reproduce one. The state keeps the `rng`
- * it was built with so re-arming (or a reset) re-rolls from the same stream
- * rather than needing it threaded back in every time.
+ * The hold has to stay unlearnable, which means real randomness — the RNG is
+ * a caller-supplied function rather than a hardcoded `Math.random` purely so
+ * a test can pin it down and assert on an exact value. That is the whole
+ * reason for the injection: it is not what keeps a replay or a ghost lap
+ * correct. Those (physics/ghost.js, physics/replay.js) record concrete input
+ * frames and reconstruct nothing from the hold or its RNG, so they are just
+ * as bit-exact with the default `Math.random` as with any seed. The state
+ * keeps the `rng` it was built with so re-arming (or a reset) re-rolls from
+ * the same stream rather than needing it threaded back in every time.
  *
  * Free of three.js and the DOM, so the sequencing, the randomness bounds and
  * the jump-start rule can all be argued with in a test. The caller owns the

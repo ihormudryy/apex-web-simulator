@@ -108,11 +108,14 @@ const SKYBOX_Y = SKYBOX_HEIGHT + SKYBOX_GROUND_Y;
 /**
  * Minimal seeded PRNG (mulberry32) for the start-lights hold.
  *
- * `Math.random` cannot be seeded, so a ghost/replay could never reproduce the
- * hold it drew. `createStartLights` takes any `() => number`, so handing it
- * one of these seeded from wall-clock entropy gives a hold that is as
- * unpredictable to the driver as `Math.random` was, while still being a pure
- * function of a seed a replay could pin down.
+ * `createStartLights` takes any `() => number` and defaults to `Math.random`,
+ * which would work fine for real play on its own — a ghost/replay lap never
+ * reconstructs anything from the hold or its RNG (they record concrete input
+ * frames instead; see startLights.js's header). Seeding it here buys nothing
+ * for correctness. It is used anyway for the same reason the injection point
+ * exists at all: a fixed seed is what lets a test pin an exact hold down,
+ * and wall-clock entropy is a convenient, cheap source of one that stays
+ * just as unpredictable to the driver as `Math.random` was.
  */
 function seededRng(seed) {
   let s = seed >>> 0;
@@ -340,8 +343,9 @@ class HelloRacer {
     // 0, driven by the keyboard instead of `driveAi` — see raceField.js's header.
     this.field = createRaceField(this.track, { rivals: 1, level: 'pro', physicsMode: this.physicsMode });
     // Both cars sit on the grid, held, until the player arms the lights — see
-    // _armStart, and startLights.js's header for why the RNG is seeded here
-    // rather than left on the module's Math.random default.
+    // _armStart. `seededRng` here is not a determinism requirement (see its
+    // own comment); it just gives each race a hold as unpredictable as
+    // `Math.random` would, drawn from a source a test could also pin down.
     this.startLights = createStartLights(seededRng(newRaceSeed()));
 
     this.car = new Car(this.scene, {
@@ -1268,8 +1272,8 @@ class HelloRacer {
     this.car.restoreMeshDamage();
     this.rivalCar.restoreMeshDamage();
     this._launched = false;
-    // A genuinely new race: fresh seed, so this race's hold is unrelated to
-    // the last one's — see startLights.js's header on why the seed lives here.
+    // A fresh seed for a fresh race, so this race's hold has no relation to
+    // the last one's — cosmetic rather than load-bearing, same as at init().
     this.startLights = createStartLights(seededRng(newRaceSeed()));
     if (this.telemetry?.reset) this.telemetry.reset();
     this._chaseReady = false;
@@ -1325,6 +1329,7 @@ class HelloRacer {
     // it before the field steps so `field.locked` reflects this frame's phase,
     // and `stepField` (see raceField.js) is the single gate holding BOTH cars
     // on the grid, rival included, so the rival cannot creep off early either.
+    const wasLocked = this.field.locked;
     const throttlePressed = Boolean(this.car.input.forward || this.car.input.reverse);
     advanceStartLights(this.startLights, dt, throttlePressed);
     if (jumpStartExpired(this.startLights)) {
@@ -1332,6 +1337,15 @@ class HelloRacer {
       resetStartLights(this.startLights);
     }
     this.field.locked = startInputLocked(this.startLights);
+    // `advance` (physics/vehicle.js) records a step onto `car.vehicle.recorder`
+    // every frame it runs, locked or not — so without this, the ghost's next
+    // lap would open with however long the grid sat armed, the ~7 s gantry
+    // itself, and any aborted jump-start retries, all recorded as the car
+    // sitting still under brake. None of that is the lap. Reset right on the
+    // unlock edge — the one frame the car is actually freed to drive — so the
+    // recording starts exactly where the lap does, however long the player
+    // waited to press START.
+    if (wasLocked && !this.field.locked) resetGhostState(this.ghost);
     this._checkLaunch();
     this.startLightsHud?.update(this.startLights);
     // Every car on the grid, stepped together — contact resolves against both

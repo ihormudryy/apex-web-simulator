@@ -108,6 +108,23 @@ test('a jump start returns to idle so the player must re-arm', () => {
   assert.equal(s.phase, 'idle');
 });
 
+test('re-arming re-rolls the hold, so a jump-started player cannot learn it by retrying', () => {
+  // Every other test in this file arms with a constant `() => 0.5`, which
+  // cannot tell a re-roll on arm apart from a stale hold left over from
+  // `createStartLights` — both read 0.5. This RNG returns a different value
+  // on each call specifically so that a broken re-roll (or none at all)
+  // shows up as `first === second` instead of passing by accident.
+  let n = 0;
+  const values = [0.1, 0.9];
+  const rng = () => values[n++ % values.length];
+  const s = createStartLights(rng);
+  armStartLights(s);
+  const first = s.hold;
+  armStartLights(s);
+  const second = s.hold;
+  assert.notEqual(first, second, 'arming twice gave the same hold — re-arming must re-roll it');
+});
+
 test('the hold is not learnable, but is reproducible from a seed', () => {
   const seeded = () => { let n = 0; return () => ((n = (n * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff); };
   const a = createStartLights(seeded());
