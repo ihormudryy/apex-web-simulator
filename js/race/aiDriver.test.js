@@ -43,13 +43,14 @@ function runLaps(levelId, seconds) {
   setPose(car, s.x, s.z, Math.atan2(-s.tx, -s.tz), track);
   const ai = createAiState(levelId);
   const input = { forward: false, reverse: false, left: false, right: false, brake: false };
-  let offRoad = 0, laps = 0, prevT = 0, lapStart = 0;
+  let offRoad = 0, laps = 0, prevT = 0, lapStart = 0, topSpeed = 0;
   const lapTimes = [];
   const frames = Math.round(seconds / DT);
   for (let f = 0; f < frames; f++) {
     driveAi(ai, car, line, input);
     updateSteering(car, input, DT);
     advance(car, input, track, DT);
+    topSpeed = Math.max(topSpeed, forwardSpeed(car));
     const q = track.query(car.x, car.z);
     if (Math.abs(q.lateral) > q.halfWidth + 1) offRoad++;
     if (q.t < prevT - 0.5 && f * DT - lapStart > 20) {
@@ -57,7 +58,7 @@ function runLaps(levelId, seconds) {
     }
     prevT = q.t;
   }
-  return { offRoad, frames, laps, lapTimes, resets: car.resets };
+  return { offRoad, frames, laps, lapTimes, resets: car.resets, topSpeed };
 }
 
 test('every difficulty completes a lap without leaving the road', () => {
@@ -67,6 +68,30 @@ test('every difficulty completes a lap without leaving the road', () => {
     assert.ok(r.laps >= 1, `${id}: completed no laps in 320 s`);
     assert.ok(r.offRoad / r.frames < 0.02,
       `${id}: off the road for ${(100 * r.offRoad / r.frames).toFixed(1)}% of the run`);
+  }
+});
+
+test('each difficulty gets close to its own top speed on this circuit', () => {
+  // The bug this guards against: an earlier version rescaled `level.topSpeed`
+  // itself by the cornering ratio instead of only the curvature-derived term,
+  // so a level's straight-line cap was silently clipped down too. That was
+  // invisible to the other tests here, because all three levels still scaled
+  // down together and kept their relative order. Thresholds are set below
+  // the measured post-fix fraction of `topSpeed` reached on Silverstone's
+  // straights (club 100%, pro 95%, ace 88% — see the DIFFICULTY doc comment
+  // in aiDriver.js for the full measurement and why `ace` alone tops out
+  // under 90%: its `topSpeed` sits above the corner-scaled ceiling the
+  // planner's own nearest-station lookahead already imposes, a genuine
+  // property of the circuit and the driver model, not a bug), with margin
+  // for run-to-run noise but tight enough to catch the same class of
+  // regression: the pre-fix numbers were club 79%, pro 88%.
+  const minFraction = { club: 0.90, pro: 0.90, ace: 0.75 };
+  for (const id of DIFFICULTY_ORDER) {
+    const r = runLaps(id, 420);
+    const fraction = r.topSpeed / DIFFICULTY[id].topSpeed;
+    assert.ok(fraction >= minFraction[id],
+      `${id}: reached only ${r.topSpeed.toFixed(1)} m/s, `
+      + `${(100 * fraction).toFixed(0)}% of its ${DIFFICULTY[id].topSpeed} m/s cap`);
   }
 });
 

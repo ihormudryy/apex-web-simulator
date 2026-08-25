@@ -41,21 +41,26 @@ const wrap = a => {
  *
  * These numbers are not free to move independently. Sweeping `latG` at a
  * fixed `brakeG` ratio (below) turns up a narrow, chaotic instability band
- * around 1.46-1.50 g — a specific corner (one of the surveyed hairpins) sits
+ * starting around 1.46 g and getting worse through 1.50-1.55 before a small
+ * partial recovery — a specific corner (one of the surveyed hairpins) sits
  * right at the edge of available grip there, and a hundredth of a g either
  * side is the difference between a clean 0%-off-road lap and the car
- * spending 60-90% of a run stuck in the scenery. `ace` is set at 1.44, with
- * deliberate margin below that cliff rather than pushed up against it, so it
- * stays robust to the small aim-point nudges the defend/avoid logic adds
- * when a rival is nearby.
+ * spending double-digit to 50%+ of a run stuck in the scenery. This band
+ * moved only slightly after fixing the top-speed-floor bug below (see that
+ * comment) — onset is still ~1.46, versus ~1.46-1.48 before the fix — so it
+ * is a property of the corner and the braking/steering model, not an
+ * artefact of the floor bug. `ace` is set at 1.44, with deliberate margin
+ * below that cliff rather than pushed up against it, so it stays robust to
+ * the small aim-point nudges the defend/avoid logic adds when a rival is
+ * nearby.
  *
  * MEASURED best lap over 420 s on the shipped Silverstone circuit, 0% of
  * every run spent off the road (throwaway calibration script, re-run after
  * any change to the driver, the racing line, or the car):
  *
- *     club   165.4 s   latG 1.00   brakeG 1.25   topSpeed 70
- *     pro    146.4 s   latG 1.25   brakeG 1.56   topSpeed 85
- *     ace    138.4 s   latG 1.44   brakeG 1.80   topSpeed 92
+ *     club   157.5 s   latG 1.00   brakeG 1.25   topSpeed 70   reaches 100% of topSpeed
+ *     pro    144.8 s   latG 1.25   brakeG 1.56   topSpeed 85   reaches  95% of topSpeed
+ *     ace    137.8 s   latG 1.44   brakeG 1.80   topSpeed 92   reaches  88% of topSpeed
  *
  * `lap.test.js` records ~131 s for a flat-out quasi-static planner and ~150 s
  * for a cautious one. `pro` sits in the cautious band; `ace`, held back from
@@ -63,6 +68,20 @@ const wrap = a => {
  * matching it. That gap is the driver model's margin for safety, not the
  * table inflated to hit a number — pushing `ace` closer to 131 s means
  * pushing it into the chaotic band above, which is a worse trade.
+ *
+ * `ace` reaching only 88% of its own `topSpeed` is not the bug below: even
+ * with the floor fixed, the loop's nearest stations (small `d`) are still
+ * curvature-derived and still get `cornerScale`d, and on this circuit they
+ * dominate the min before the braking term has grown enough to let a later,
+ * unscaled station win. `club`'s low cap (70) sits well under that
+ * corner-scaled ceiling everywhere on the lap, so it alone saturates at
+ * 100%. This was checked directly: re-running the OLD buggy formula through
+ * this same measurement showed `ace`'s reachable speed essentially
+ * unchanged by the fix (80.8 -> 81.2 m/s, 88% -> 88%), while `club` jumped
+ * from 55.5 m/s (79%) to 70.1 m/s (100%) and `pro` from 75.2 (88%) to 80.5
+ * (95%) — the floor bug mattered exactly where the ruling said it would:
+ * levels whose `topSpeed` sits below the corner-scaled ceiling, not ones
+ * whose `topSpeed` sits above it.
  */
 export const DIFFICULTY = {
   club: { id: 'club', label: 'Club', latG: 1.00, brakeG: 1.25, topSpeed: 70 },
@@ -118,17 +137,26 @@ export function driveAi(ai, car, line, out, rival = null) {
   const brakeA = level.brakeG * 9.81;
   const horizon = Math.round((HORIZON_PAD + (v * v) / (2 * brakeA)) / line.spacing);
   const step = Math.max(1, Math.round(4 / line.spacing));
+  // The line's cornering limit is quoted at LINE_LAT_G; rescale it to this
+  // driver's own budget. This factor must be applied to the CURVATURE-DERIVED
+  // term only, inside the loop — never to `level.topSpeed`. A top speed is
+  // set by power and drag, not by grip, so a cornering ratio has no business
+  // touching it. Applying it to the floor as well (an earlier version of this
+  // function multiplied `target` by the ratio after the loop, which silently
+  // scaled the straight-line cap too) left `club` unable to get within 21% of
+  // its own documented top speed anywhere on the circuit, because the loop
+  // never overrides `target` on a straight (line.speed is at its 92 m/s cap
+  // there, always above level.topSpeed) yet the post-loop multiply still
+  // clipped it down.
+  const cornerScale = Math.sqrt(level.latG / LINE_LAT_G);
   let target = level.topSpeed;
   for (let d = 0; d < horizon; d += step) {
     const i = (here + d) % n;
-    // Speed we may be doing HERE and still slow to line.speed[i] by then.
-    const allowed = Math.sqrt(
-      line.speed[i] * line.speed[i] + 2 * brakeA * d * line.spacing);
+    const cornerV = line.speed[i] * cornerScale;
+    // Speed we may be doing HERE and still slow to cornerV by then.
+    const allowed = Math.sqrt(cornerV * cornerV + 2 * brakeA * d * line.spacing);
     if (allowed < target) target = allowed;
   }
-  // The line's own limit is quoted at LINE_LAT_G; scale it to this driver.
-  target *= Math.sqrt(level.latG / LINE_LAT_G);
-  target = Math.min(target, level.topSpeed);
 
   // --- steering: pure pursuit to a point on the line ahead ---
   const lookahead = Math.max(LOOKAHEAD_MIN, LOOKAHEAD_TIME * v);
