@@ -18,8 +18,28 @@ export class BinLoader {
     return new Response(stream).arrayBuffer();
   }
 
+  /**
+   * Parsed geometry, keyed by url.
+   *
+   * Two cars on track load the same body and the same four tyres. Without this
+   * the second car refetches, re-inflates and re-uploads every one of them, for
+   * an identical result and a doubled GPU footprint.
+   */
+  static _cache = new Map();
+  static _pending = new Map();
+
+  static clearCache() {
+    BinLoader._cache.clear();
+    BinLoader._pending.clear();
+  }
+
   static load(url, callback) {
-    fetch(url)
+    const cached = BinLoader._cache.get(url);
+    if (cached) { callback(cached); return; }
+    const inflight = BinLoader._pending.get(url);
+    if (inflight) { inflight.then(callback); return; }
+
+    const job = fetch(url)
       .then(async r => {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
         let buf = await r.arrayBuffer();
@@ -29,7 +49,19 @@ export class BinLoader {
         }
         return buf;
       })
-      .then(buf => callback(BinLoader.parse(buf)))
-      .catch(e => console.error('Failed to load', url, e));
+      .then(buf => {
+        const geo = BinLoader.parse(buf);
+        BinLoader._cache.set(url, geo);
+        BinLoader._pending.delete(url);
+        return geo;
+      })
+      .catch(e => {
+        BinLoader._pending.delete(url);
+        console.error('Failed to load', url, e);
+        throw e;
+      });
+
+    BinLoader._pending.set(url, job);
+    job.then(callback).catch(() => {});
   }
 }
