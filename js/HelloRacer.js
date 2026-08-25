@@ -26,6 +26,7 @@ import { CreditsPanel } from './dash/CreditsPanel.js';
 import { createTelemetry } from './dash/telemetry.js';
 import { SetupPanel } from './dash/setupPanel.js';
 import { PhysicsModePanel, ensureTopRightStack } from './dash/PhysicsModePanel.js';
+import { RivalPanel } from './dash/RivalPanel.js';
 import {
   readStoredPhysicsMode, resolvePhysicsMode, writeStoredPhysicsMode,
 } from './physics/physicsMode.js';
@@ -104,6 +105,18 @@ const SKYBOX_RADIUS = 2200;
 // as ground — it only has to stay out of the way.
 const SKYBOX_GROUND_Y = -0.35;
 const SKYBOX_Y = SKYBOX_HEIGHT + SKYBOX_GROUND_Y;
+
+/**
+ * The rival's livery: a hue-shifted copy of the shipped "Apex Racing" body
+ * paint (midnight blue / orange — see `scripts/generate-body-paint.py`), not
+ * a second catalog shell. `obj/cars/*` is gitignored, user-downloaded CC-BY
+ * art absent on a fresh clone and on the deployed site, so a rival built from
+ * one would be an invisible car for most players. 160deg turns the navy into
+ * a dark maroon and the orange into cyan — distinct from the player's paint
+ * at a glance, and (checked directly) not a rotation that lands back near
+ * navy the way the complementary 180deg does.
+ */
+const RIVAL_LIVERY = { hueDeg: 160 };
 
 /**
  * Minimal seeded PRNG (mulberry32) for the start-lights hold.
@@ -364,6 +377,7 @@ class HelloRacer {
     this.rivalCar = new Car(this.scene, {
       backend: this._rendererBackend,
       physicsMode: this.physicsMode,
+      livery: RIVAL_LIVERY,
     });
     this.rivalCar.loadAssets(this._envMap);
 
@@ -372,6 +386,7 @@ class HelloRacer {
     this._mountRenderPanel(topRight);
     this._mountPhysicsModePanel(topRight);
     this._mountCarPicker(topRight);
+    this._mountRivalPanel(topRight);
 
     this.telemetry = createTelemetry({ lapLength: this.track.centerline.length });
     this.dashboard = new Dashboard(container, this.track, { circuitName: DEFAULT_CIRCUIT_NAME });
@@ -580,6 +595,24 @@ class HelloRacer {
       initial: this.physicsMode,
       onChange: mode => this._applyPhysicsMode(mode),
     });
+  }
+
+  _mountRivalPanel(container) {
+    this.rivalPanel = new RivalPanel(container, {
+      onLevelChange: level => this._applyRivalLevel(level),
+    });
+  }
+
+  /**
+   * Re-level the rival's AI in place. `field.entries[n].ai.level` is read
+   * fresh by `driveAi` every step (see `race/aiDriver.js`), so writing it
+   * here is the whole change — no rebuild, no new AI state, and no gap where
+   * a stored preference string was never actually threaded into a driver.
+   */
+  _applyRivalLevel(level) {
+    for (const e of this.field.entries) {
+      if (!e.isPlayer && e.ai) e.ai.level = level;
+    }
   }
 
   _applyPhysicsMode(mode) {
@@ -1168,6 +1201,7 @@ class HelloRacer {
     this.dashboard.toggle();
     this.controlHints.setVisible(this.dashboard.visible);
     this.credits?.setVisible(this.dashboard.visible);
+    this.rivalPanel?.setVisible(this.dashboard.visible);
   }
 
   /**
@@ -1456,6 +1490,7 @@ class HelloRacer {
     this._updateGhost(snap, dt);
     this.engineAudio.update(snap);
     if (this.dashboard.visible) this.dashboard.update(snap, dt);
+    this.rivalPanel?.update(this.field);
   }
 
   _applyJitter() {

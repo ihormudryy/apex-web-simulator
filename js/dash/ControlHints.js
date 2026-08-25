@@ -64,6 +64,7 @@ const HINT_ROWS = [
   ['C', 'camera (finish)'],
   ['Q', 'quality (auto)'],
   ['+ / −', 'rear zoom'],
+  ['START', 'race the rival'],
   ['H', 'hide HUD'],
   ['Esc', 'reset'],
 ];

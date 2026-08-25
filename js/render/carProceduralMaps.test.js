@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   normalFromHeight, roughnessFromNoise, metallicFromNoise,
   specularIntensityFromNoise, carbonWeaveNormal, tyreMicroNormalAndRoughness,
+  hueRotateRGBA,
 } from './carProceduralMaps.js';
 
 test('orange-peel normal encodes a mostly-up normal (high Z)', () => {
@@ -84,6 +85,33 @@ test('specular intensity varies in ALPHA, the only channel three reads', () => {
   }
   assert.ok(min / 255 > 0.2 && max / 255 < 1.0,
     `specular multiplier ${(min / 255).toFixed(2)}..${(max / 255).toFixed(2)} out of range`);
+});
+
+test('hueRotateRGBA leaves grey pixels (ink, panel shading) exactly alone', () => {
+  for (const angle of [0, 37, 90, 165, 240, 333]) {
+    const data = new Uint8ClampedArray([12, 12, 12, 255, 200, 200, 200, 128]);
+    hueRotateRGBA(data, angle);
+    assert.deepEqual([...data], [12, 12, 12, 255, 200, 200, 200, 128],
+      `angle ${angle}: grey pixel moved to [${data.join(',')}]`);
+  }
+});
+
+test('hueRotateRGBA leaves alpha untouched and moves a saturated hue', () => {
+  const data = new Uint8ClampedArray([255, 0, 0, 200]);
+  hueRotateRGBA(data, 120);
+  assert.equal(data[3], 200, 'alpha must be untouched');
+  // 120 degrees moves red toward green: green channel should now dominate.
+  assert.ok(data[1] > data[0] && data[1] > data[2],
+    `red rotated 120deg did not become green-dominant: [${data.join(',')}]`);
+});
+
+test('hueRotateRGBA at 0 degrees is the identity (within rounding)', () => {
+  const data = new Uint8ClampedArray([10, 130, 240, 255]);
+  const before = [...data];
+  hueRotateRGBA(data, 0);
+  for (let i = 0; i < 4; i++) {
+    assert.ok(Math.abs(data[i] - before[i]) <= 1, `channel ${i}: ${before[i]} -> ${data[i]}`);
+  }
 });
 
 test('greyscale maps fill every channel, so any read channel works', () => {

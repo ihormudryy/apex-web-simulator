@@ -24,6 +24,35 @@ The bundled track is a **generic procedural layout** labelled *Northamptonshire 
 | H | Hide HUD |
 | + / − | Rear camera zoom |
 | 1–3, T, G | Render FX toggles (see Render panel) |
+| START button | Arm the lights, race the rival (3 laps) |
+
+## Racing the rival
+
+A single AI rival lines up alongside you on the grid, in a hue-shifted version
+of the default "Apex Racing" livery so the two cars stay easy to tell apart.
+Press the **START** button (top centre) to arm the light sequence — five red
+lights, then lights out. Jump the start and the lights reset for another try.
+The race is three laps; standings, current lap and the gap to the rival (in
+seconds, `+` if you're behind) are on the **Rival** panel, top-right, next to
+the difficulty buttons.
+
+Difficulty scales how much of the car the AI actually uses — braking and
+cornering g, and a top-speed cap — never the physics itself; it drives the
+same car through the same code the keyboard does. Measured best laps on this
+circuit (0% of the run off-road):
+
+| Level | Best lap |
+|-------|----------|
+| Club | ~157.5 s |
+| Pro | ~144.8 s |
+| Ace | ~137.8 s |
+
+For reference, a flat-out quasi-static planner laps this circuit in about
+131 s — even Ace stays a few seconds off that pace, deliberately: pushing it
+closer sits right at a corner's grip limit and costs far more in off-road
+excursions than it gains in pace. Your choice of level is remembered
+(`apex-web-simulator.rivalLevel`) and takes effect immediately, mid-race
+included.
 
 ## Mods / car catalog
 

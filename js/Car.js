@@ -6,7 +6,7 @@ import {
 } from './physics/vehicle.js';
 import {
   normalFromHeight, roughnessFromNoise, metallicFromNoise, specularIntensityFromNoise,
-  carbonWeaveNormal, tyreMicroNormalAndRoughness,
+  carbonWeaveNormal, tyreMicroNormalAndRoughness, hueRotateRGBA,
 } from './render/carProceduralMaps.js';
 import { MASS, G, WB, LR, LF } from './physics/constants.js';
 import { cockpitSteerAngle, followSteerAngle } from './render/cockpitSteer.js';
@@ -48,12 +48,16 @@ const STEER_HUB = { x: 0, y: 0.5933, z: 0.5054 };
 export class Car {
   /**
    * @param {THREE.Scene} scene
-   * @param {{ backend?: 'webgl' | 'webgpu' }} [options]
+   * @param {{ backend?: 'webgl' | 'webgpu', livery?: { hueDeg: number } | null }} [options]
+   *   `livery.hueDeg` recolours the body paint (see `_bodyPaintTexture` below)
+   *   so a rival car reads as a different team at a glance. `null`/omitted
+   *   keeps the shipped "Apex Racing" paint untouched.
    */
-  constructor(scene, { backend = 'webgl', physicsMode = 'arcade' } = {}) {
+  constructor(scene, { backend = 'webgl', physicsMode = 'arcade', livery = null } = {}) {
     this.root = new THREE.Object3D();
     scene.add(this.root);
     this._backend = backend === 'webgpu' ? 'webgpu' : 'webgl';
+    this._livery = livery;
     this._particles = enableCarParticleSystems(this._backend);
 
     // Yaw-free pitch/roll carrier. It must sit OUTSIDE visualRoot's constant
@@ -534,6 +538,43 @@ export class Car {
   }
 
   /**
+   * A hue-shifted copy of `BodyPaint.jpg`, for the rival's livery — see the
+   * `livery` constructor option.
+   *
+   * Deliberately drawn to a fresh `<canvas>` per call rather than mutating a
+   * shared image or `DataTexture`: `BinLoader` caches parsed *geometry* by
+   * url exactly so two cars can share GPU buffers (see its header), but a
+   * texture is a different story — this recolour must land on ONLY this
+   * car's material, or the player's own body paint would shift the moment a
+   * rival spawned. `THREE.TextureLoader.load` already hands back a brand-new
+   * `Texture` (and, with the default `Cache.enabled === false`, a fresh
+   * `Image`) on every call, so drawing into a new canvas here can never
+   * alias the other car's — this comment records that invariant, not a lock
+   * this code takes out itself.
+   * @param {THREE.TextureLoader} tl
+   * @returns {THREE.Texture}
+   */
+  _tintedBodyPaintTexture(tl) {
+    const hueDeg = this._livery.hueDeg;
+    const t = tl.load('obj/textures/BodyPaint.jpg', loaded => {
+      const img = loaded.image;
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      hueRotateRGBA(frame.data, hueDeg);
+      ctx.putImageData(frame, 0, 0);
+      loaded.image = canvas;
+      loaded.needsUpdate = true;
+    });
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 8;
+    return t;
+  }
+
+  /**
    * @param {THREE.Texture} [environment] PMREM environment for the metallic and
    *   glossy parts. Without one, `metalness` has nothing to reflect and reads black.
    */
@@ -603,7 +644,7 @@ export class Car {
     } : {};
 
     this.bodyPaintMat = new THREE.MeshPhysicalMaterial({
-      map: tex('obj/textures/BodyPaint.jpg'),
+      map: this._livery ? this._tintedBodyPaintTexture(tl) : tex('obj/textures/BodyPaint.jpg'),
       envMap, envMapIntensity: 0.72,
       roughness: 0.38, roughnessMap: bodyRoughTex,
       metalness: 0.0, metalnessMap: bodyMetalTex,
