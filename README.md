@@ -32,9 +32,12 @@ A single AI rival lines up alongside you on the grid, in a hue-shifted version
 of the default "Apex Racing" livery so the two cars stay easy to tell apart.
 Press the **START** button (top centre) to arm the light sequence — five red
 lights, then lights out. Jump the start and the lights reset for another try.
-The race is three laps; standings, current lap and the gap to the rival (in
-seconds, `+` if you're behind) are on the **Rival** panel, top-right, next to
-the difficulty buttons.
+The race is three laps; standings, current lap and the gap to the rival are on
+the **Rival** panel, top-right, next to the difficulty buttons. The gap reads
+in seconds (`+` if you're behind) when you're on the same lap, switches to a
+lap count (`+1 LAP`) once one of you has lapped the other, and shows the
+rival's finish time once it crosses the line — a live distance-based number
+stops being meaningful the moment the other car parks.
 
 Difficulty scales how much of the car the AI actually uses — braking and
 cornering g, and a top-speed cap — never the physics itself; it drives the
@@ -56,8 +59,9 @@ included.
 
 ## Mods / car catalog
 
-Use the **Car** panel (top-right) to pick a shell. The bundled **Ferrari** is the
-default. Mercedes W14 and AMR23 load from `obj/cars/` — see
+Use the **Car** panel (top-right) to pick a shell. The bundled **Apex GT1** —
+the original HelloRacer placeholder mesh, in the fictional "Apex Racing"
+livery — is the default. Mercedes W14 and AMR23 load from `obj/cars/` — see
 [obj/cars/README.md](obj/cars/README.md) for the Sketchfab zip layout.
 
 You can also drag a `.glb` / `.gltf` onto the page:

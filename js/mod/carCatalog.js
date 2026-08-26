@@ -2,8 +2,13 @@
  * Built-in car catalog — local glTF shells under `obj/cars/`.
  *
  * Physics stays on the HelloRacer rig; these entries only swap the body mesh.
- * The bundled Ferrari is the default. AMR23 and W14 are the Sketchfab shells
- * from the Downloads folder (you place the files; we do not redistribute).
+ * The bundled **Apex GT1** is the default: the original HelloRacer placeholder
+ * mesh, wearing the fictional "Apex Racing" livery (see `Car.js`'s `livery`
+ * option and `carProceduralMaps.js`'s `hueRotateRGBA`) — no real marque, so
+ * nothing here needs the trademark disclaimer the downloaded shells below do.
+ * AMR23 and W14 are the Sketchfab shells from the Downloads folder (you place
+ * the files; we do not redistribute) — real, trademarked cars, covered by
+ * `obj/cars/README.md`'s own license/trademark section.
  *
  *   - AMR23: https://sketchfab.com/3d-models/aston-martin-f1-amr23-2023-f6ba825a43b146a9b669934a4e1fd529
  *   - W14:   https://sketchfab.com/3d-models/mercedes-f1-w14-free-26fda66f3e8a48d5a636056f8a64e299
@@ -43,8 +48,8 @@
 /** @type {CarCatalogEntry[]} */
 export const CAR_CATALOG = [
   {
-    id: 'ferrari',
-    label: 'Ferrari',
+    id: 'apex',
+    label: 'Apex GT1',
     url: null,
     attribution: 'Bundled HelloRacer placeholder mesh',
     license: 'Project MIT (placeholder art)',
@@ -72,7 +77,7 @@ export const CAR_CATALOG = [
   },
 ];
 
-export const DEFAULT_CAR_ID = 'ferrari';
+export const DEFAULT_CAR_ID = 'apex';
 
 /**
  * @param {string} id
@@ -84,12 +89,20 @@ export function carById(id) {
 
 /**
  * Persist last pick across reloads.
+ *
+ * `ferrari` is a legacy value: the bundled entry's id until the trademarked
+ * label was renamed away (see the module header). Mapping it forward here —
+ * the same shape as the pre-existing `default` shim — means a returning
+ * player's saved pick still resolves to the same bundled car instead of
+ * silently landing on whatever `DEFAULT_CAR_ID` happens to be today.
+ *
+ * @param {Pick<Storage, 'getItem'> | null | undefined} [storage]
  * @returns {string}
  */
-export function readStoredCarId() {
+export function readStoredCarId(storage = globalThis.localStorage) {
   try {
-    let v = localStorage.getItem('helloracer.carId');
-    if (v === 'default') v = 'ferrari';
+    let v = storage?.getItem?.('helloracer.carId');
+    if (v === 'default' || v === 'ferrari') v = DEFAULT_CAR_ID;
     if (v && carById(v)) return v;
   } catch {
     /* private mode */
@@ -99,10 +112,11 @@ export function readStoredCarId() {
 
 /**
  * @param {string} id
+ * @param {Pick<Storage, 'setItem'> | null | undefined} [storage]
  */
-export function writeStoredCarId(id) {
+export function writeStoredCarId(id, storage = globalThis.localStorage) {
   try {
-    localStorage.setItem('helloracer.carId', id);
+    storage?.setItem?.('helloracer.carId', id);
   } catch {
     /* private mode */
   }

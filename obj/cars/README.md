@@ -1,14 +1,15 @@
 # External car shells
 
 Place downloaded glTF packages here. The in-game **Car** picker loads them as
-body visuals only — physics stays on the HelloRacer rig. The bundled **Ferrari**
-is the default and does not need a file here.
+body visuals only — physics stays on the HelloRacer rig. The bundled **Apex
+GT1** — the original HelloRacer placeholder mesh, in the fictional "Apex
+Racing" livery, no real marque — is the default and does not need a file here.
 
 ## Catalog
 
 | Path | Catalog label | Source |
 |------|---------------|--------|
-| *(bundled)* | Ferrari | HelloRacer placeholder mesh |
+| *(bundled)* | Apex GT1 | HelloRacer placeholder mesh |
 | `w14/scene.gltf` (+ `scene.bin`, `textures/`) | Mercedes W14 (2023) | [W14 FREE](https://sketchfab.com/3d-models/mercedes-f1-w14-free-26fda66f3e8a48d5a636056f8a64e299) |
 | `amr23/scene.gltf` (+ `scene.bin`, `textures/`) | AMR23 (2023) | [AMR23](https://sketchfab.com/3d-models/aston-martin-f1-amr23-2023-f6ba825a43b146a9b669934a4e1fd529) |
 
