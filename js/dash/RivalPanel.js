@@ -21,8 +21,8 @@
  */
 
 import { DIFFICULTY, DIFFICULTY_ORDER } from '../race/aiDriver.js';
-import { standings, RACE_LAPS, gapSeconds } from '../race/raceField.js';
-import { formatDelta } from './telemetry.js';
+import { standings, RACE_LAPS, rivalGapDisplay } from '../race/raceField.js';
+import { formatDelta, formatLapTime } from './telemetry.js';
 
 export const RIVAL_PREF_KEY = 'apex-web-simulator.rivalLevel';
 export const LEGACY_RIVAL_PREF_KEY = 'helloracer.rivalLevel';
@@ -175,6 +175,28 @@ function el(tag, className, text) {
   return node;
 }
 
+/**
+ * Renders the decision `rivalGapDisplay` (`raceField.js`) already made — this
+ * function only picks a format per `kind`, it does not decide which `kind`
+ * applies. `+`/`-` on the lap count follows the same "positive = trailing"
+ * convention as `formatDelta`'s seconds.
+ * @param {ReturnType<import('../race/raceField.js').rivalGapDisplay>} display
+ * @returns {string}
+ */
+function formatGapDisplay(display) {
+  switch (display.kind) {
+    case 'finished':
+      return formatLapTime(display.finishTime);
+    case 'laps': {
+      const n = Math.abs(display.delta);
+      return `${display.delta >= 0 ? '+' : '-'}${n} LAP${n === 1 ? '' : 'S'}`;
+    }
+    case 'seconds':
+    default:
+      return formatDelta(display.seconds);
+  }
+}
+
 export class RivalPanel {
   /**
    * @param {HTMLElement} container — usually the `.top-right-stack`
@@ -238,7 +260,10 @@ export class RivalPanel {
 
   /**
    * Position, lap and gap — read straight off `raceField.js`'s own field
-   * shape, nothing cached or re-derived here.
+   * shape, nothing cached or re-derived here. The gap's *shape* (seconds vs.
+   * lap count vs. a finish time) is decided by `rivalGapDisplay`, which is
+   * pure and tested on its own; this method only asks it and formats the
+   * answer.
    * @param {ReturnType<import('../race/raceField.js').createRaceField> | null} field
    */
   update(field) {
@@ -252,10 +277,7 @@ export class RivalPanel {
 
     let gapText = '—';
     if (other) {
-      const leading = order[0] === player;
-      const gapS = gapSeconds(field, player, other, field.line.length);
-      // Positive: the player is behind by this much. Negative: ahead.
-      gapText = formatDelta(leading ? -gapS : gapS);
+      gapText = formatGapDisplay(rivalGapDisplay(player, other, field.line.length));
     }
 
     const key = `${position}|${order.length}|${lap}|${gapText}`;

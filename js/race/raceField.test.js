@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createRaceField, stepField, standings, gridPose, RACE_LAPS, resetField,
+  rivalGapDisplay,
 } from './raceField.js';
 import { buildCenterline } from '../track/centerline.js';
 import { SILVERSTONE_WAYPOINTS } from '../track/silverstoneWaypoints.js';
@@ -134,4 +135,74 @@ test('contact resolves exactly once per unordered pair, for 2 and for 3 cars', (
 
   assert.equal(countPairs(1), 1); // 2 cars -> C(2,2) = 1 pair
   assert.equal(countPairs(2), 3); // 3 cars -> C(3,2) = 3 pairs
+});
+
+// `rivalGapDisplay` decides *what kind* of gap is truthful to show, not just
+// its magnitude. Same lap is the only case a live seconds figure means
+// anything; the other two are the exact failures the reviewer measured:
+// a lap apart reporting ~1.3 s, and a finished (frozen) car reporting an
+// arbitrary distance-based number.
+function placeAt(entry, sample, { vz = -30 } = {}) {
+  entry.vehicle.x = sample.x;
+  entry.vehicle.z = sample.z;
+  entry.vehicle.yaw = 0;
+  entry.vehicle.vx = 0;
+  entry.vehicle.vz = vz; // forwardSpeed = -vz*cos(0) = -vz, so vz<0 is "moving forward"
+}
+
+test('rivalGapDisplay: same lap is a live, signed seconds figure', () => {
+  const track = circuit();
+  const field = createRaceField(track, { rivals: 1, level: 'pro' });
+  const [a, b] = field.entries;
+  const lapLength = track.centerline.length;
+  const samples = track.centerline.samples;
+
+  placeAt(a, samples[0]);
+  placeAt(b, samples[Math.round((50 / lapLength) * samples.length)]);
+  a.laps = 0; a.finished = false;
+  b.laps = 0; b.finished = false;
+
+  const display = rivalGapDisplay(a, b, lapLength);
+  assert.equal(display.kind, 'seconds');
+  assert.ok(Number.isFinite(display.seconds));
+  // b sits ~50 m ahead of a on the same lap: a trails, so the sign is positive.
+  assert.ok(display.seconds > 0, `expected a positive (trailing) gap, got ${display.seconds}`);
+  assert.ok(display.seconds < 10, `50 m at ~20+ m/s should be a few seconds, got ${display.seconds}`);
+});
+
+test('rivalGapDisplay: a lap apart at the same track position is a lap count, not ~1.3 s', () => {
+  const track = circuit();
+  const field = createRaceField(track, { rivals: 1, level: 'pro' });
+  const [a, b] = field.entries;
+  const lapLength = track.centerline.length;
+  const s = track.centerline.samples[100];
+
+  // Same point on the ring — the scenario that used to report ~1.3 s.
+  placeAt(a, s);
+  placeAt(b, s);
+  a.laps = 0; a.finished = false;
+  b.laps = 1; b.finished = false;
+
+  const display = rivalGapDisplay(a, b, lapLength);
+  assert.equal(display.kind, 'laps');
+  assert.equal(display.delta, 1, 'a is exactly one lap behind b');
+});
+
+test('rivalGapDisplay: a finished car reports its finish time, not a live position gap', () => {
+  const track = circuit();
+  const field = createRaceField(track, { rivals: 1, level: 'pro' });
+  const [a, b] = field.entries;
+  const lapLength = track.centerline.length;
+  const samples = track.centerline.samples;
+
+  // Wildly different track positions on purpose: a finished car's parked
+  // position must not leak into the readout at all.
+  placeAt(a, samples[0]);
+  placeAt(b, samples[2000]);
+  a.laps = RACE_LAPS - 1; a.finished = false;
+  b.laps = RACE_LAPS; b.finished = true; b.finishTime = 123.456;
+
+  const display = rivalGapDisplay(a, b, lapLength);
+  assert.equal(display.kind, 'finished');
+  assert.equal(display.finishTime, 123.456);
 });

@@ -238,9 +238,40 @@ export function standings(field) {
   });
 }
 
-/** Gap to the car ahead in seconds, at the following car's current speed. */
-export function gapSeconds(field, entry, ahead, lapLength) {
-  const rel = relativeTo(entry, ahead, lapLength);
+/**
+ * What a gap readout should show for `entry` relative to `other` — one of
+ * three truthful pictures, not one number stretched to cover all of them.
+ *
+ * `relativeTo` wraps the along-track distance to within half a lap, which is
+ * only meaningful when both cars are on the *same* lap: a car a whole lap
+ * behind at the same track fraction wraps to a few metres and reports a
+ * seconds gap of about nothing, which is a lie — it also hides the lap
+ * itself, the fact that actually matters. And `stepField` stops advancing a
+ * `finished` entry, so its track position afterwards is wherever it happened
+ * to cross the line, not a live target — a distance-based gap to a parked
+ * car isn't a gap, it's an artefact of where it stopped.
+ *
+ * So: different lap counts get a lap difference (what a timing screen shows,
+ * and unambiguous); a finished `other` gets its finish time instead of a
+ * live figure; only the same-lap, still-racing case gets a seconds gap.
+ *
+ * Sign convention throughout: positive means `entry` trails `other`.
+ *
+ * @param {object} entry the viewing car
+ * @param {object} other the car being compared to
+ * @param {number} lapLength metres
+ * @returns {{kind: 'finished', finishTime: number}
+ *   | {kind: 'laps', delta: number}
+ *   | {kind: 'seconds', seconds: number}}
+ */
+export function rivalGapDisplay(entry, other, lapLength) {
+  if (other.finished) {
+    return { kind: 'finished', finishTime: other.finishTime };
+  }
+  if (entry.laps !== other.laps) {
+    return { kind: 'laps', delta: other.laps - entry.laps };
+  }
+  const rel = relativeTo(entry, other, lapLength);
   const v = Math.max(forwardSpeed(entry.vehicle), 5);
-  return Math.abs(rel.aheadGap) / v;
+  return { kind: 'seconds', seconds: rel.aheadGap / v };
 }
