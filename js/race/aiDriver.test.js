@@ -76,8 +76,9 @@ test('every difficulty completes a lap without leaving the road', () => {
  * that let a stable-looking `ace` ship with an absorbing off-road state: the
  * defend/avoid aim-point nudge only engages with a rival present, and a
  * follower sitting a car-width to one side with a close, breathing gap (3-9 m,
- * the commonest race position) is enough to walk `ace` past its instability
- * cliff — see aiDriver.js's `defendBudget`. Same bound as the rival-less test.
+ * the commonest race position) is enough to walk `ace` onto one of the
+ * scattered unstable notches documented in aiDriver.js's `DIFFICULTY` header
+ * — see `defendBudget`. Same bound as the rival-less test.
  *
  * The rival is held one car-width (1.5 m) to the side, rigidly in the car's
  * own frame (via its `right = (cos yaw, -sin yaw)`, see vehicle.js), rather

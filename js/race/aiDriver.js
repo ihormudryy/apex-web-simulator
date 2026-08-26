@@ -39,35 +39,60 @@ const wrap = a => {
  * `latG` and `brakeG` are planning figures, deliberately under the car's true
  * limit for the reason in the header.
  *
- * These numbers are not free to move independently. Sweeping `latG` at a
- * fixed `brakeG` ratio (below) turns up a narrow, chaotic instability band
- * starting around 1.46 g and getting worse through 1.50-1.55 before a small
- * partial recovery — a specific corner (one of the surveyed hairpins) sits
- * right at the edge of available grip there, and a hundredth of a g either
- * side is the difference between a clean 0%-off-road lap and the car
- * spending double-digit to 50%+ of a run stuck in the scenery. This band has
- * not moved across two rounds of fixes to the speed planner below — onset is
- * still ~1.46 g, with the sweep numbers matching to within 0.1 s and 0.1
- * percentage points before and after both fixes — so it is a property of the
- * corner and the braking/steering model, not an artefact of either bug.
- * `ace` is set at 1.44, with deliberate margin below that cliff rather than
- * pushed up against it — but that margin ALONE turned out not to be enough:
- * measured with a rival present (a follower one car-width to the side, gap
- * breathing 3-9 m, the commonest race position), the unscaled defend/avoid
- * aim-point nudge put `ace` off the road in 4 of 10 realistic configurations
- * — 2 of those at 84-86% of the run, the other 2 at 18.8% and 1.6% — all
- * beginning at the same corner ~29 s in, and none of the 4 ever recovered
- * once off — an absorbing state, not a wobble, since `driveAi`
- * never sets `reverse`. `defendBudget` below is the actual fix: it scales the
- * total defend+avoid offset by how much headroom a level's `latG` has under
- * the cliff, calibrated against `pro`'s headroom (0.21 g, measured clean at
- * the full offset budget in every configuration). `ace`'s 0.02 g headroom
- * (9.5% of that reference) falls below the usable floor, so it gets NO
- * defend/avoid nudge at all — its margin is too thin to spend any of it on
- * racecraft — while `pro` and `club` keep the full budget. See
- * `aiDriver.test.js`'s "with a rival present" test, which drives every
- * difficulty through this exact scenario and is what should have caught this
- * before it shipped.
+ * These numbers are not free to move independently, and the interaction is
+ * NOT a simple threshold. Sweeping `latG` from 1.30 to 1.47 g in 0.01 steps,
+ * driving 200 s solo laps, twice — once scaling `brakeG` with `latG`, once
+ * holding `brakeG` at `ace`'s shipped 1.80 — turns up scattered unstable
+ * notches spread across the WHOLE range, not a threshold with safe territory
+ * below it:
+ *
+ *     brakeG scaled with latG:   unstable at 1.41 (85.8% off-road),
+ *                                1.45 (3.0%). 1.40 clean.
+ *     brakeG held at 1.80:       unstable at 1.34 (6.5%), 1.36 (4.0%),
+ *                                1.37 (85.6%), 1.40 (16.7%), 1.43 (12.8%),
+ *                                1.45 (17.2%).
+ *
+ * Both sweeps are CLEAN at 1.46 AND 1.47 — there is no cliff at 1.46, despite
+ * `INSTABILITY_CLIFF_G` below being set to that value. `ace`'s 1.44 is not
+ * "0.02 g of margin below a cliff" — it is a lucky clean notch that happens
+ * to survive both sweep methods, which is the actual reason it has passed
+ * every check on this branch. Which values are unstable even depends on
+ * whether `brakeG` scales with `latG` — an incidental methodology choice —
+ * which is the signature of a fragile nonlinear interaction between the
+ * braking/steering model and specific corner geometry, NOT a grip limit with
+ * a clean boundary. The underlying instability is UNDIAGNOSED: located and
+ * avoided by picking a notch that measures clean, not understood. Any future
+ * change to the car, the tyres, the racing line, or the circuit can reshuffle
+ * which values are clean, so these constants must be re-swept before being
+ * trusted again, not assumed to still hold.
+ *
+ * `defendBudget` below computes a level's "headroom" as `1.46 - latG` and
+ * scales the defend/avoid budget down as that headroom shrinks, on the
+ * premise that less headroom means less safety margin. That premise is FALSE
+ * by the sweep data above: 1.34 g and 1.37 g have far MORE headroom under
+ * 1.46 than `ace`'s 1.44 g, yet both are badly unstable (6.5% and 85.6%
+ * off-road) while `ace` is clean. `defendBudget` is a CONSERVATIVE HEURISTIC,
+ * not a derivation from a known safety boundary — it happens to floor
+ * `ace`'s budget to zero, and that specific outcome was checked empirically
+ * (below), but the "headroom under 1.46" reasoning it is built on does not
+ * actually track which values are stable.
+ *
+ * That heuristic exists because of a real, measured failure: with a rival
+ * present (a follower one car-width to the side, gap breathing 3-9 m, the
+ * commonest race position), the unscaled defend/avoid aim-point nudge put
+ * `ace` off the road in 4 of 10 realistic configurations — 2 of those at
+ * 84-86% of the run, the other 2 at 18.8% and 1.6% — all beginning at the
+ * same corner ~29 s in, and none of the 4 ever recovered once off — an
+ * absorbing state, not a wobble, since `driveAi` never sets `reverse`.
+ * `defendBudget` fixes that, verifiably: `pro` was measured clean — 0%
+ * off-road — at the FULL `DEFEND_MAX_OFFSET` budget across every one of the
+ * reviewer's ten realistic-chase configurations, so `pro`'s figure is known
+ * safe under that specific test, whatever the reason. `ace`'s 0.02 g
+ * "headroom" (9.5% of `pro`'s) falls below the heuristic's usable floor, so
+ * it gets NO defend/avoid nudge at all — while `pro` and `club` keep the
+ * full budget. See `aiDriver.test.js`'s "with a rival present" test, which
+ * drives every difficulty through this exact scenario and is what should
+ * have caught the original failure before it shipped.
  *
  * MEASURED best lap over 420 s on the shipped Silverstone circuit, 0% of
  * every run spent off the road (throwaway calibration script, re-run after
@@ -78,13 +103,15 @@ const wrap = a => {
  *     ace    137.8 s   latG 1.44   brakeG 1.80   topSpeed 92   reaches  88.2% of topSpeed
  *
  * `lap.test.js` records ~131 s for a flat-out quasi-static planner and ~150 s
- * for a cautious one. `pro` sits in the cautious band; `ace`, held back from
- * the instability cliff, lands about 7 s off the flat-out figure rather than
- * matching it, and CANNOT currently be brought closer: pushing `brakeG` up
- * (to shorten the braking phase and hold speed longer) does not help — it
- * shrinks the planning horizon (see `HORIZON_PAD` below) and pushes `ace`
- * straight into the instability band instead of gaining pace. That gap is
- * reported plainly rather than tuned away.
+ * for a cautious one. `pro` sits in the cautious band; `ace`, held at a
+ * `latG`/`brakeG` pair chosen because it measures clean rather than because
+ * it is close to some known limit, lands about 7 s off the flat-out figure
+ * rather than matching it, and CANNOT currently be brought closer: pushing
+ * `brakeG` up (to shorten the braking phase and hold speed longer) does not
+ * help — it shrinks the planning horizon (see `HORIZON_PAD` below), and per
+ * the sweep data above the nearby values are as likely to land on one of the
+ * scattered unstable notches as to gain pace. That gap is reported plainly
+ * rather than tuned away.
  *
  * `pro` and `ace` reaching under 100% of their own `topSpeed` is real and
  * was checked directly, not assumed: re-running each with `topSpeed` raised
@@ -129,7 +156,8 @@ const BRAKE_MARGIN = 1.05;
  * simply drives the rival off its own line. "Bounded" alone is not the same
  * as "safe": see `defendBudget` — `DEFEND_MAX_OFFSET` is a per-effect cap, not
  * a guarantee about what the combined defend+avoid nudge does to a level
- * sitting close to the instability cliff documented above.
+ * whose own `latG` sits on one of the scattered unstable notches documented
+ * on `DIFFICULTY` above.
  */
 export const DEFEND_MAX_OFFSET = 1.6;
 export const DEFEND_RANGE = 25;
@@ -137,32 +165,46 @@ export const DEFEND_RANGE = 25;
 export const ALONGSIDE_CLEARANCE = 2.4;
 
 /**
- * Onset of the instability band documented on `DIFFICULTY` above. Not a hard
- * wall — the band is "narrow and chaotic", not a clean step — but it is the
- * measured, reproducible onset across two rounds of unrelated fixes, so it is
- * the right number to plan headroom against.
+ * NOT a validated instability threshold, despite the name — see the sweep
+ * data on `DIFFICULTY` above. Both 1.46 and 1.47 measured CLEAN in every
+ * sweep run; the unstable values are scattered across the whole 1.30-1.47
+ * range instead, and which ones are unstable depends on whether `brakeG`
+ * scales with `latG` in the sweep. This value is kept because it is the
+ * anchor `defendBudget` already shipped with: it is what makes `ace`'s
+ * computed "headroom" come out at 0.02 g, small enough to floor its budget
+ * to zero — and THAT specific outcome (ace gets zero, pro/club keep full
+ * budget) was checked empirically, see `aiDriver.test.js`'s "with a rival
+ * present" test. It is not evidence that grip runs out at 1.46 g; treat the
+ * name as legacy of the incorrect cliff model this constant was designed
+ * under, not as a fact about the car.
  */
 const INSTABILITY_CLIFF_G = 1.46;
 /**
- * `pro`'s headroom under the cliff (0.21 g), used to calibrate `defendBudget`
- * below: `pro` was measured clean — 0% off-road — at the FULL
+ * `pro`'s gap under `INSTABILITY_CLIFF_G` (0.21 g), used as the calibration
+ * reference for `defendBudget` below. This is NOT "0.21 g of headroom makes
+ * `pro` safe" — the sweep data on `DIFFICULTY` above shows levels with far
+ * MORE of this gap (1.34 g, 1.37 g) that are badly unstable. It is simply the
+ * fact that `pro` was measured clean — 0% off-road — at the FULL
  * `DEFEND_MAX_OFFSET` budget across every one of the reviewer's ten
- * realistic-chase configurations, so that much headroom is known to be safe
- * at the full budget. A level with less headroom gets proportionally less.
+ * realistic-chase configurations. `defendBudget` uses this as an anchor for a
+ * conservative heuristic, not as proof that this gap predicts stability.
  */
 const CALIBRATED_HEADROOM_G = INSTABILITY_CLIFF_G - DIFFICULTY.pro.latG;
 
 /**
- * Below this fraction of `pro`'s calibrated headroom, a level's own margin is
- * too thin to absorb ANY consistent aim-point bias safely. Measured: even a
- * ~1 cm constant offset (from scaling the budget by headroom² instead of
- * flooring it below this fraction) eventually tipped `ace` off the same
- * corner, at the same time, regardless of how the follower's gap moved —
- * because a rival within `DEFEND_RANGE` saturates `defendBias` at its clamp
- * for almost the entire time a follower is present, so the "small" nudge a
- * smooth scale leaves behind is not small in duration, only in amplitude.
- * Below this fraction the budget floors to zero rather than asymptoting
- * toward it.
+ * Below this fraction of `CALIBRATED_HEADROOM_G`, `defendBudget` floors to
+ * zero instead of asymptoting toward it. This is a heuristic knob tuned to
+ * one known failure, not a derived safety threshold — see `DIFFICULTY`'s
+ * header for why "headroom under `INSTABILITY_CLIFF_G`" does not actually
+ * track instability in general. Measured: even a ~1 cm constant offset (from
+ * scaling the budget by headroom² instead of flooring it below this
+ * fraction) eventually tipped `ace` off the same corner, at the same time,
+ * regardless of how the follower's gap moved — because a rival within
+ * `DEFEND_RANGE` saturates `defendBias` at its clamp for almost the entire
+ * time a follower is present, so the "small" nudge a smooth scale leaves
+ * behind is not small in duration, only in amplitude. The floor exists to
+ * zero that residual for the one case that broke, `ace`; it is not derived
+ * from a general grip-margin argument.
  */
 const MIN_USABLE_HEADROOM_FRACTION = 0.25;
 
@@ -170,19 +212,25 @@ const MIN_USABLE_HEADROOM_FRACTION = 0.25;
  * Total defend+avoid aim-point offset a level is allowed, in metres.
  *
  * C1: the unscaled nudge (up to `DEFEND_MAX_OFFSET` from defending, plus more
- * from `alongsideAvoid`) was enough to walk `ace` — whose own `latG` sits
- * only 0.02 g below the instability cliff — over the edge into an absorbing
- * off-road state. Rather than guess a metres-to-g conversion for the nudge
- * (the cliff is a property of one specific corner's geometry and the
- * braking/steering model, not something with a clean closed form), this
- * scales the budget directly by how much of `CALIBRATED_HEADROOM_G` a level
- * has: full budget at `pro`'s headroom or more, shrinking linearly down to
- * `MIN_USABLE_HEADROOM_FRACTION`, then floored to zero. `ace`'s 0.02 g
- * headroom (9.5% of the calibration reference) falls below that floor, so it
- * gets no defend/avoid nudge at all — its own margin is too thin to spend any
- * of it on racecraft. Verified empirically, not just by construction — see
- * `aiDriver.test.js`'s "with a rival present" test, which runs the same
- * realistic-chase scenario that broke `ace` before this fix, at every level.
+ * from `alongsideAvoid`) was enough to walk `ace` — sitting on a `latG` that
+ * turned out to be one of the scattered unstable notches once nudged off its
+ * measured-clean line, not on some known edge of grip — into an absorbing
+ * off-road state (see `DIFFICULTY` above for the sweep data). There is no
+ * known metres-to-g conversion for the nudge, and no validated grip boundary
+ * to convert against: the instability is UNDIAGNOSED, located and avoided by
+ * sweeping, not understood. Absent that, this scales the budget by
+ * `1.46 - latG` relative to `pro`'s same figure: full budget at `pro`'s
+ * figure or more, shrinking linearly down to `MIN_USABLE_HEADROOM_FRACTION`,
+ * then floored to zero. This is a CONSERVATIVE HEURISTIC, not a derivation
+ * from a known safety boundary — the sweep data shows levels with MORE of
+ * this "headroom" (1.34 g, 1.37 g) that are badly unstable, so headroom
+ * under 1.46 does not actually predict stability. It happens to floor
+ * `ace`'s budget to zero, and THAT specific outcome is verified empirically,
+ * not just by construction — see `aiDriver.test.js`'s "with a rival present"
+ * test, which runs the same realistic-chase scenario that broke `ace` before
+ * this fix, at every level. Treat this function as "known to zero `ace`'s
+ * budget and keep `pro`/`club` at full budget, and nothing more" — not as a
+ * physically-grounded margin calculation.
  */
 function defendBudget(level) {
   const headroom = Math.max(0, INSTABILITY_CLIFF_G - level.latG);
@@ -251,7 +299,8 @@ export function driveAi(ai, car, line, out, rival = null) {
     // normal, so it is their SUM that matters to stability, not either one
     // bounded in isolation — clamp the combined offset to this level's
     // headroom-scaled budget (see `defendBudget`) so no combination of the
-    // two effects can walk a level past its own instability cliff.
+    // two effects can walk a level onto one of the scattered unstable
+    // notches documented on `DIFFICULTY` above.
     const total = clamp(defendBias(rival) + alongsideAvoid(car, rival),
       -defendBudget(level), defendBudget(level));
     if (total !== 0) {

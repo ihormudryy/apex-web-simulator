@@ -43,12 +43,12 @@ Difficulty scales how much of the car the AI actually uses — braking and
 cornering g, and a top-speed cap — never the physics itself; it drives the
 same car through the same code the keyboard does. Measured best laps on this
 circuit, solo (no rival on track, 0% of the run off-road) — racing a rival
-adds defending and avoidance behaviour that can cost a little pace but is kept
-within a bound that never pushes a level off the road (see `aiDriver.js`'s
-`defendBudget`). That bound is zero at **Ace**: its own margin to the grip
-limit is too thin to spend any of it on racecraft, so it does not defend or
-avoid at all — an Ace rival's line is bit-identical with or without you
-alongside it:
+adds defending and avoidance behaviour that is capped by a conservative
+heuristic budget (see `aiDriver.js`'s `defendBudget`) tuned to the specific
+rival scenario it was measured against. That budget is zero at **Ace**:
+letting it defend or avoid at full strength was measured to put it off the
+road in realistic chase configurations, so it does not defend or avoid at
+all — an Ace rival's line is bit-identical with or without you alongside it:
 
 | Level | Best lap |
 |-------|----------|
@@ -57,9 +57,12 @@ alongside it:
 | Ace | ~137.8 s |
 
 For reference, a flat-out quasi-static planner laps this circuit in about
-131 s — even Ace stays a few seconds off that pace, deliberately: pushing it
-closer sits right at a corner's grip limit and costs far more in off-road
-excursions than it gains in pace. Your choice of level is remembered
+131 s — even Ace stays a few seconds off that pace, deliberately: its
+cornering and braking figures were picked as a notch that measures clean
+among a scattered, undiagnosed set of unstable ones nearby (see
+`aiDriver.js`'s `DIFFICULTY` header for the sweep data), and pushing them
+further risks landing on an unstable one instead of gaining pace. Your choice
+of level is remembered
 (`apex-web-simulator.rivalLevel`) and takes effect immediately, mid-race
 included.
 
