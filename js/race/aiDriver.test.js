@@ -71,6 +71,53 @@ test('every difficulty completes a lap without leaving the road', () => {
   }
 });
 
+/**
+ * `runLaps` above drives with `rival = null`, which is exactly the blind spot
+ * that let a stable-looking `ace` ship with an absorbing off-road state: the
+ * defend/avoid aim-point nudge only engages with a rival present, and a
+ * follower sitting a car-width to one side with a close, breathing gap (3-9 m,
+ * the commonest race position) is enough to walk `ace` past its instability
+ * cliff — see aiDriver.js's `defendBudget`. Same bound as the rival-less test.
+ */
+function runLapsWithRival(levelId, seconds) {
+  const track = circuit();
+  const line = buildRacingLine(track.centerline.samples);
+  const s = track.centerline.samples[0];
+  const car = createVehicle({ warm: true });
+  setPose(car, s.x, s.z, Math.atan2(-s.tx, -s.tz), track);
+  const ai = createAiState(levelId);
+  const input = { forward: false, reverse: false, left: false, right: false, brake: false };
+  // A follower one car-width to the side whose gap breathes between 3 and
+  // 9 m over ~17 s — never a constant, knife-edge bias, but the commonest
+  // race position. This exact period/side is one of the reviewer's worst
+  // measured configurations for `ace` (85.5% of the run off-road).
+  const rival = { x: 0, z: 0, lateralGap: -1.5, aheadGap: -6 };
+  const period = 17;
+  let offRoad = 0;
+  const frames = Math.round(seconds / DT);
+  for (let f = 0; f < frames; f++) {
+    rival.x = car.x;
+    rival.z = car.z;
+    rival.aheadGap = -(6 + 3 * Math.sin((2 * Math.PI * (f * DT)) / period));
+    driveAi(ai, car, line, input, rival);
+    updateSteering(car, input, DT);
+    advance(car, input, track, DT);
+    const q = track.query(car.x, car.z);
+    if (Math.abs(q.lateral) > q.halfWidth + 1) offRoad++;
+  }
+  return { offRoad, frames, resets: car.resets };
+}
+
+test('every difficulty completes a lap without leaving the road, with a rival present', () => {
+  for (const id of DIFFICULTY_ORDER) {
+    const r = runLapsWithRival(id, 200);
+    assert.equal(r.resets, 0, `${id}: physics went non-finite with a rival present`);
+    assert.ok(r.offRoad / r.frames < 0.02,
+      `${id}: off the road for ${(100 * r.offRoad / r.frames).toFixed(1)}% of the run `
+      + 'with a rival present');
+  }
+});
+
 test('each difficulty gets close to its own top speed on this circuit', () => {
   // The bug this guards against had two layers, both in the speed planner:
   // first, rescaling `level.topSpeed` itself by a cornering ratio (fixed);

@@ -51,8 +51,22 @@ const wrap = a => {
  * percentage points before and after both fixes — so it is a property of the
  * corner and the braking/steering model, not an artefact of either bug.
  * `ace` is set at 1.44, with deliberate margin below that cliff rather than
- * pushed up against it, so it stays robust to the small aim-point nudges the
- * defend/avoid logic adds when a rival is nearby.
+ * pushed up against it — but that margin ALONE turned out not to be enough:
+ * measured with a rival present (a follower one car-width to the side, gap
+ * breathing 3-9 m, the commonest race position), the unscaled defend/avoid
+ * aim-point nudge put `ace` off the road for 84-86% of the run in 3 of 10
+ * realistic configurations, all beginning at the same corner ~29 s in, and
+ * it never recovered — an absorbing state, not a wobble, since `driveAi`
+ * never sets `reverse`. `defendBudget` below is the actual fix: it scales the
+ * total defend+avoid offset by how much headroom a level's `latG` has under
+ * the cliff, calibrated against `pro`'s headroom (0.21 g, measured clean at
+ * the full offset budget in every configuration). `ace`'s 0.02 g headroom
+ * (9.5% of that reference) falls below the usable floor, so it gets NO
+ * defend/avoid nudge at all — its margin is too thin to spend any of it on
+ * racecraft — while `pro` and `club` keep the full budget. See
+ * `aiDriver.test.js`'s "with a rival present" test, which drives every
+ * difficulty through this exact scenario and is what should have caught this
+ * before it shipped.
  *
  * MEASURED best lap over 420 s on the shipped Silverstone circuit, 0% of
  * every run spent off the road (throwaway calibration script, re-run after
@@ -78,11 +92,15 @@ const wrap = a => {
  * every one of those caps; `pro`: 80.5 m/s at every one). Neither level is
  * being held back by its own `topSpeed` value or by anything left over from
  * the two speed-planner bugs fixed in this module's history (see the
- * `driveAi` comment) — the ceiling is Silverstone's longest straight and the
- * car's own acceleration curve, which no driver-side number changes. `club`
- * alone reaches ~100% because its cap (70) sits below that real ceiling
- * everywhere on the lap; `pro` and `ace` do not, and no amount of retuning
- * `latG`/`brakeG`/`topSpeed` within the stable range closes that gap further.
+ * `driveAi` comment) — raising `topSpeed` far past the real cap and seeing no
+ * change only rules out topSpeed-coupling, though; it cannot distinguish
+ * Silverstone's longest straight and the car's own acceleration curve from
+ * conservatism in the planner's own braking horizon (`HORIZON_PAD` below) as
+ * the reason `pro`/`ace` fall short of it, so that split is asserted, not
+ * measured. `club` alone reaches ~100% because its cap (70) sits below the
+ * real ceiling everywhere on the lap; `pro` and `ace` do not, and no amount
+ * of retuning `latG`/`brakeG`/`topSpeed` within the stable range closes that
+ * gap further.
  */
 export const DIFFICULTY = {
   club: { id: 'club', label: 'Club', latG: 1.00, brakeG: 1.25, topSpeed: 70 },
@@ -107,12 +125,70 @@ const BRAKE_MARGIN = 1.05;
 /**
  * Defending: bias the aim point toward the inside when a car is close behind.
  * Bounded hard — this is racecraft, not blocking, and an unbounded version
- * simply drives the rival off its own line.
+ * simply drives the rival off its own line. "Bounded" alone is not the same
+ * as "safe": see `defendBudget` — `DEFEND_MAX_OFFSET` is a per-effect cap, not
+ * a guarantee about what the combined defend+avoid nudge does to a level
+ * sitting close to the instability cliff documented above.
  */
 export const DEFEND_MAX_OFFSET = 1.6;
 export const DEFEND_RANGE = 25;
 /** Keep at least this much clear of a car alongside, m. */
 export const ALONGSIDE_CLEARANCE = 2.4;
+
+/**
+ * Onset of the instability band documented on `DIFFICULTY` above. Not a hard
+ * wall — the band is "narrow and chaotic", not a clean step — but it is the
+ * measured, reproducible onset across two rounds of unrelated fixes, so it is
+ * the right number to plan headroom against.
+ */
+const INSTABILITY_CLIFF_G = 1.46;
+/**
+ * `pro`'s headroom under the cliff (0.21 g), used to calibrate `defendBudget`
+ * below: `pro` was measured clean — 0% off-road — at the FULL
+ * `DEFEND_MAX_OFFSET` budget across every one of the reviewer's ten
+ * realistic-chase configurations, so that much headroom is known to be safe
+ * at the full budget. A level with less headroom gets proportionally less.
+ */
+const CALIBRATED_HEADROOM_G = INSTABILITY_CLIFF_G - DIFFICULTY.pro.latG;
+
+/**
+ * Below this fraction of `pro`'s calibrated headroom, a level's own margin is
+ * too thin to absorb ANY consistent aim-point bias safely. Measured: even a
+ * ~1 cm constant offset (from scaling the budget by headroom² instead of
+ * flooring it below this fraction) eventually tipped `ace` off the same
+ * corner, at the same time, regardless of how the follower's gap moved —
+ * because a rival within `DEFEND_RANGE` saturates `defendBias` at its clamp
+ * for almost the entire time a follower is present, so the "small" nudge a
+ * smooth scale leaves behind is not small in duration, only in amplitude.
+ * Below this fraction the budget floors to zero rather than asymptoting
+ * toward it.
+ */
+const MIN_USABLE_HEADROOM_FRACTION = 0.25;
+
+/**
+ * Total defend+avoid aim-point offset a level is allowed, in metres.
+ *
+ * C1: the unscaled nudge (up to `DEFEND_MAX_OFFSET` from defending, plus more
+ * from `alongsideAvoid`) was enough to walk `ace` — whose own `latG` sits
+ * only 0.02 g below the instability cliff — over the edge into an absorbing
+ * off-road state. Rather than guess a metres-to-g conversion for the nudge
+ * (the cliff is a property of one specific corner's geometry and the
+ * braking/steering model, not something with a clean closed form), this
+ * scales the budget directly by how much of `CALIBRATED_HEADROOM_G` a level
+ * has: full budget at `pro`'s headroom or more, shrinking linearly down to
+ * `MIN_USABLE_HEADROOM_FRACTION`, then floored to zero. `ace`'s 0.02 g
+ * headroom (9.5% of the calibration reference) falls below that floor, so it
+ * gets no defend/avoid nudge at all — its own margin is too thin to spend any
+ * of it on racecraft. Verified empirically, not just by construction — see
+ * `aiDriver.test.js`'s "with a rival present" test, which runs the same
+ * realistic-chase scenario that broke `ace` before this fix, at every level.
+ */
+function defendBudget(level) {
+  const headroom = Math.max(0, INSTABILITY_CLIFF_G - level.latG);
+  const fraction = headroom / CALIBRATED_HEADROOM_G;
+  if (fraction < MIN_USABLE_HEADROOM_FRACTION) return 0;
+  return DEFEND_MAX_OFFSET * clamp(fraction, 0, 1);
+}
 
 export function createAiState(levelId = 'pro') {
   return { level: DIFFICULTY[levelId] ? levelId : 'pro', hint: 0, aim: 0 };
@@ -135,7 +211,7 @@ export function driveAi(ai, car, line, out, rival = null) {
   ai.hint = here;
 
   // --- speed: the slowest thing between here and a braking distance ahead ---
-  const brakeA = level.brakeG * 9.81;
+  const brakeA = level.brakeG * G;
   const horizon = Math.round((HORIZON_PAD + (v * v) / (2 * brakeA)) / line.spacing);
   const step = Math.max(1, Math.round(4 / line.spacing));
   // Corner speed comes from `line.curvature`, not `line.speed`. `line.speed`
@@ -170,22 +246,20 @@ export function driveAi(ai, car, line, out, rival = null) {
   let aimZ = line.z[ahead];
 
   if (rival) {
-    const bias = defendBias(rival);
-    if (bias !== 0) {
+    // Defending and avoiding both push the same aim point along the same
+    // normal, so it is their SUM that matters to stability, not either one
+    // bounded in isolation — clamp the combined offset to this level's
+    // headroom-scaled budget (see `defendBudget`) so no combination of the
+    // two effects can walk a level past its own instability cliff.
+    const total = clamp(defendBias(rival) + alongsideAvoid(car, rival),
+      -defendBudget(level), defendBudget(level));
+    if (total !== 0) {
       // Push the aim point sideways, along the local line normal.
       const nx = -(line.z[(ahead + 1) % n] - line.z[ahead]);
       const nz = (line.x[(ahead + 1) % n] - line.x[ahead]);
       const len = Math.hypot(nx, nz) || 1;
-      aimX += (nx / len) * bias;
-      aimZ += (nz / len) * bias;
-    }
-    const keep = alongsideAvoid(car, rival);
-    if (keep !== 0) {
-      const nx = -(line.z[(ahead + 1) % n] - line.z[ahead]);
-      const nz = (line.x[(ahead + 1) % n] - line.x[ahead]);
-      const len = Math.hypot(nx, nz) || 1;
-      aimX += (nx / len) * keep;
-      aimZ += (nz / len) * keep;
+      aimX += (nx / len) * total;
+      aimZ += (nz / len) * total;
     }
   }
 
@@ -201,7 +275,7 @@ export function driveAi(ai, car, line, out, rival = null) {
   out.right = car.steerSmooth < want - STEER_DEADBAND;
 
   // --- pedals ---
-  const lateralUse = Math.abs(car.av) * v / (level.latG * 9.81);
+  const lateralUse = Math.abs(car.av) * v / (level.latG * G);
   out.forward = v < target && lateralUse < LATERAL_LIFT;
   out.brake = v > target * BRAKE_MARGIN;
   out.reverse = false;
