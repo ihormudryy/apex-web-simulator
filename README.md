@@ -45,7 +45,10 @@ same car through the same code the keyboard does. Measured best laps on this
 circuit, solo (no rival on track, 0% of the run off-road) — racing a rival
 adds defending and avoidance behaviour that can cost a little pace but is kept
 within a bound that never pushes a level off the road (see `aiDriver.js`'s
-`defendBudget`):
+`defendBudget`). That bound is zero at **Ace**: its own margin to the grip
+limit is too thin to spend any of it on racecraft, so it does not defend or
+avoid at all — an Ace rival's line is bit-identical with or without you
+alongside it:
 
 | Level | Best lap |
 |-------|----------|

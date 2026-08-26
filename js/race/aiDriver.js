@@ -54,9 +54,10 @@ const wrap = a => {
  * pushed up against it — but that margin ALONE turned out not to be enough:
  * measured with a rival present (a follower one car-width to the side, gap
  * breathing 3-9 m, the commonest race position), the unscaled defend/avoid
- * aim-point nudge put `ace` off the road for 84-86% of the run in 3 of 10
- * realistic configurations, all beginning at the same corner ~29 s in, and
- * it never recovered — an absorbing state, not a wobble, since `driveAi`
+ * aim-point nudge put `ace` off the road in 4 of 10 realistic configurations
+ * — 2 of those at 84-86% of the run, the other 2 at 18.8% and 1.6% — all
+ * beginning at the same corner ~29 s in, and none of the 4 ever recovered
+ * once off — an absorbing state, not a wobble, since `driveAi`
  * never sets `reverse`. `defendBudget` below is the actual fix: it scales the
  * total defend+avoid offset by how much headroom a level's `latG` has under
  * the cliff, calibrated against `pro`'s headroom (0.21 g, measured clean at
