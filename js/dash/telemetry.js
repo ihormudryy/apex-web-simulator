@@ -19,17 +19,27 @@ const MAX_STEER = 18 * Math.PI / 180;
 const SLIP_FLOOR = 2;
 /** Peak-hold on the g meter bleeds away at this many g per second. */
 const PEAK_DECAY = 0.35;
+/**
+ * A "lap" quicker than this is the start-line seam (`t` wrapping from ~1 to
+ * ~0 within a station or two), not a lap. `raceField.js` runs the exact same
+ * wrap check against its own clock and imports this rather than redeclaring
+ * it — two modules independently detecting the same lap crossing with
+ * different clocks and a duplicated constant is its own failure mode (it hid
+ * the phantom-lap bug: `raceField`'s clock could start from a different
+ * baseline than this one and still pass its own copy of the guard).
+ */
+export const MIN_LAP_TIME = 20;
 
 /**
  * @param {object} options
  * @param {number} options.lapLength metres, for distance readouts.
  * @param {number} [options.sectors=3] timing sectors.
  * @param {number} [options.deltaBuckets=400] resolution of the best-lap trace.
- * @param {number} [options.minLapTime=20] a "lap" quicker than this is the car
- *   jittering over the line, not a lap.
+ * @param {number} [options.minLapTime=MIN_LAP_TIME] a "lap" quicker than this
+ *   is the car jittering over the line, not a lap.
  */
 export function createTelemetry({
-  lapLength, sectors = 3, deltaBuckets = 400, minLapTime = 20,
+  lapLength, sectors = 3, deltaBuckets = 400, minLapTime = MIN_LAP_TIME,
 } = {}) {
   const state = {
     lapTime: 0,

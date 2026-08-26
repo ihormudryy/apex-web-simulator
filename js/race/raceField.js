@@ -11,22 +11,51 @@
  * frame at 600 Hz, linear to 20 cars.
  *
  * Free of three.js. The renderer draws whatever pose each entry reports.
+ *
+ * KNOWN LIMITATION: `stepField` (and the `driveAi` call inside it) runs once
+ * per RENDERED frame, while each entry's `advance` sub-steps the physics
+ * itself at a fixed 600 Hz internally (see CLAUDE.md, "Sim clock != frame
+ * clock"). The physics is refresh-rate independent; the AI's *decision* rate
+ * is not — a rival re-aims and re-plans once per frame, so it samples the
+ * racing line and the speed target coarser at 30 fps than at 144 fps.
+ * Measured: a 1.8% lap-time spread (about 2.5 s a lap) across 30-144 fps.
+ * The `DIFFICULTY` calibration table in aiDriver.js is only valid at the
+ * 60 Hz it was measured on. Restructuring `driveAi` to run at a fixed rate
+ * decoupled from the render loop (mirroring how physics already works) would
+ * fix this properly; that is out of scope for this fix wave and is recorded
+ * here rather than attempted.
  */
 
 import {
-  createVehicle, setPose, advance, updateSteering, resetVehicle, forwardSpeed,
+  createVehicle, setPose, advance, updateSteering, resetVehicle, forwardSpeed, speed,
 } from '../physics/vehicle.js';
 import { createAiState, driveAi } from './aiDriver.js';
 import { buildRacingLine } from './racingLine.js';
 import { resolveCarContact, createCarContact } from '../physics/carContact.js';
+import { MIN_LAP_TIME } from '../dash/telemetry.js';
 
 /** Three laps: long enough that a mistake costs the race, short enough to re-run. */
 export const RACE_LAPS = 3;
 /** Grid slots either side of the centreline, and the stagger between them, m. */
 export const GRID_LATERAL = 1.9;
 export const GRID_STAGGER = 5.0;
-/** A "lap" quicker than this is the start-line seam, not a lap. See telemetry.js. */
-const MIN_LAP_TIME = 20;
+/** Same off-road bound `aiDriver.test.js` uses: 1 m past the tarmac/kerb edge. */
+const OFF_ROAD_MARGIN = 1;
+/** Below this the rival counts as stopped, not just slow through a corner. */
+const STALL_SPEED = 1.0;
+/**
+ * How long a rival must sit off-road and stopped before the field returns it
+ * to the grid. `driveAi` never sets `reverse` (see aiDriver.js), so a beached
+ * rival cannot recover on its own — this is the mitigation the design doc
+ * promises ("the field returns a stranded rival to the grid rather than
+ * modelling a recovery") and that shipped without an implementation.
+ *
+ * 3 s is long enough that the AI's normal driving — which can be
+ * off-road-and-slow only briefly, e.g. correcting a slide onto the kerb —
+ * never trips it, but short enough that a genuinely beached car (which stays
+ * at v=0 indefinitely, an absorbing state) doesn't sit parked for long.
+ */
+const STALL_TIME = 3.0;
 
 /**
  * A per-entry view of the track.
@@ -97,6 +126,13 @@ export function createRaceField(track, {
     const vehicle = createVehicle({ physicsMode });
     const pose = gridPose(track, slot);
     setPose(vehicle, pose.x, pose.z, pose.yaw, view);
+    // Seeded from the ACTUAL grid `t`, not 0: a grid slot sits just before the
+    // start/finish line (t close to 1), and starting `prevT` at 0 made the
+    // very first step look like a backward wrap across the line — the seam
+    // the MIN_LAP_TIME guard exists to reject, except the idle-plus-lights
+    // hold before the player presses START is long enough on its own to
+    // satisfy that guard too. See the C2 fix in `stepField`.
+    const gridT = view.query(pose.x, pose.z).t;
     entries.push({
       slot,
       isPlayer,
@@ -105,12 +141,14 @@ export function createRaceField(track, {
       ai: isPlayer ? null : createAiState(level),
       input: { forward: false, reverse: false, left: false, right: false, brake: false },
       laps: 0,
-      t: 0,
-      prevT: 0,
+      t: gridT,
+      prevT: gridT,
       lapStart: 0,
       elapsed: 0,
       finished: false,
       finishTime: 0,
+      // Off-road-and-stopped time, for the stranded-rival grid return below.
+      stallTime: 0,
     });
   }
   return {
@@ -124,15 +162,39 @@ export function resetField(field, track) {
     const pose = gridPose(track, e.slot);
     resetVehicle(e.vehicle);
     setPose(e.vehicle, pose.x, pose.z, pose.yaw, e.view);
+    const gridT = e.view.query(pose.x, pose.z).t;
     e.laps = 0;
-    e.t = 0;
-    e.prevT = 0;
+    e.t = gridT;
+    e.prevT = gridT;
     e.lapStart = 0;
     e.elapsed = 0;
     e.finished = false;
     e.finishTime = 0;
+    e.stallTime = 0;
   }
   return field;
+}
+
+/**
+ * Return a stranded rival to its grid slot: zero its motion and place it back
+ * on the road, but leave its race progress (`laps`, `elapsed`, `lapStart`)
+ * alone — this is recovery from being stuck, not a reset of the race.
+ *
+ * `prevT` is reseeded from the car's new (grid) position for the same reason
+ * `createRaceField`/`resetField` seed it from the actual grid `t` rather than
+ * 0: without it, the next step's `t` would look like it wrapped backward
+ * across the start/finish line from wherever the car was stuck, and — since
+ * the car has likely been racing for well over MIN_LAP_TIME already — that
+ * misread would silently credit a lap that was never driven.
+ */
+function returnToGrid(entry, track) {
+  const pose = gridPose(track, entry.slot);
+  resetVehicle(entry.vehicle);
+  setPose(entry.vehicle, pose.x, pose.z, pose.yaw, entry.view);
+  const gridT = entry.view.query(pose.x, pose.z).t;
+  entry.t = gridT;
+  entry.prevT = gridT;
+  entry.stallTime = 0;
 }
 
 /**
@@ -200,9 +262,15 @@ export function stepField(field, playerInput, track, dt) {
     advance(e.vehicle, e.input, e.view, dt);
   }
 
-  // Contact: every unordered pair exactly once.
+  // Contact: every unordered pair exactly once. Finished entries are skipped:
+  // `advance` above already stops moving them (they're done), but leaving
+  // them in this loop meant a parked car sitting dead on the racing line just
+  // past the line still absorbed momentum from whoever was still racing —
+  // physics never let go of a car the field had already stopped simulating.
   for (let i = 0; i < n; i++) {
+    if (field.entries[i].finished) continue;
     for (let j = i + 1; j < n; j++) {
+      if (field.entries[j].finished) continue;
       field.resolveContact(field.entries[i].vehicle.S, field.entries[j].vehicle.S, field.contact);
     }
   }
@@ -210,19 +278,42 @@ export function stepField(field, playerInput, track, dt) {
   // Lap accounting. `t` is a ring coordinate, so a car sitting on the start line
   // reads 0.9999 one step and 0.0001 the next; without the minimum-lap guard
   // that seam counts as a completed lap. Same rule the dashboard uses.
+  //
+  // `elapsed` only accrues once the lights go out (`!field.locked`): the idle
+  // phase before the player arms the lights is unbounded, and accruing
+  // through it (plus `prevT` starting at 0 against a grid `t` near 1) used to
+  // satisfy the MIN_LAP_TIME guard before a wheel ever turned — a rival got a
+  // free lap for roughly 13 s of sitting on the grid, sometimes the player
+  // too. `t`/`prevT` still track every step, locked or not, so the guard's
+  // clock starts exactly at lights-out with no stale wrap left over from the
+  // hold.
   for (const e of field.entries) {
     if (e.finished) continue;
-    e.elapsed += dt;
     const q = e.view.query(e.vehicle.x, e.vehicle.z);
     e.t = q.t;
-    if (e.t < e.prevT - 0.5 && e.elapsed - e.lapStart > MIN_LAP_TIME) {
-      e.laps++;
-      e.lapStart = e.elapsed;
+    if (!field.locked) {
+      e.elapsed += dt;
+      if (e.t < e.prevT - 0.5 && e.elapsed - e.lapStart > MIN_LAP_TIME) {
+        e.laps++;
+        e.lapStart = e.elapsed;
+      }
     }
     e.prevT = e.t;
     if (e.laps >= field.laps) {
       e.finished = true;
       e.finishTime = e.elapsed;
+    }
+
+    // Stranded-rival recovery (C1b): `driveAi` never sets `reverse`, so a
+    // rival pushed off-road and stopped cannot get itself back — it is an
+    // absorbing state, not a wobble. The player is exempt: teleporting a
+    // human's car without asking is a different kind of bad experience, and
+    // only the AI's own inputs can walk it into this state deterministically.
+    if (!e.isPlayer && !e.finished) {
+      const offRoad = Math.abs(q.lateral) > q.halfWidth + OFF_ROAD_MARGIN;
+      const stopped = speed(e.vehicle) < STALL_SPEED;
+      e.stallTime = offRoad && stopped ? e.stallTime + dt : 0;
+      if (e.stallTime > STALL_TIME) returnToGrid(e, track);
     }
   }
   return field;

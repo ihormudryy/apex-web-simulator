@@ -8,6 +8,7 @@ import { buildCenterline } from '../track/centerline.js';
 import { SILVERSTONE_WAYPOINTS } from '../track/silverstoneWaypoints.js';
 import { MU } from '../physics/constants.js';
 import { surfaceHeight, surfaceRoughness, verticalCurvature } from '../track/elevation.js';
+import { setPose } from '../physics/vehicle.js';
 
 const DT = 1 / 60;
 
@@ -85,6 +86,29 @@ test('a finished car stops being classified as racing', () => {
   assert.ok(e.finishTime > 0, 'a finished car has no finish time');
 });
 
+// C2: `e.elapsed` used to accrue while `field.locked`, and `prevT` started at 0
+// while the grid slots sit near t=1 — so the idle-plus-lights hold (unbounded:
+// the player may sit on the grid as long as they like) satisfied both the
+// wrap check and the MIN_LAP_TIME guard before a wheel ever turned. Sweeping
+// a spread of lock durations across the ~20 s MIN_LAP_TIME boundary is what
+// caught it — a single duration either side would not have.
+test('no lap is credited from time spent locked on the grid, across the MIN_LAP_TIME boundary', () => {
+  for (const lock of [0, 12, 19, 19.5, 20, 20.5, 25]) {
+    const track = circuit();
+    const field = createRaceField(track, { rivals: 1, level: 'ace' });
+    const input = noInput();
+    field.locked = true;
+    for (let f = 0; f < Math.round(lock / DT); f++) stepField(field, input, track, DT);
+    field.locked = false;
+    input.forward = true;
+    for (let f = 0; f < Math.round(10 / DT); f++) stepField(field, input, track, DT);
+    for (const e of field.entries) {
+      assert.equal(e.laps, 0,
+        `lock ${lock}s: entry credited ${e.laps} lap(s) after only 10 s of racing`);
+    }
+  }
+});
+
 test('resetField puts both cars back on the grid', () => {
   const track = circuit();
   const field = createRaceField(track, { rivals: 1, level: 'pro' });
@@ -99,6 +123,57 @@ test('resetField puts both cars back on the grid', () => {
     assert.equal(field.entries[i].laps, 0);
     assert.equal(field.entries[i].finished, false);
   }
+});
+
+// C1b: `driveAi` never sets `reverse`, so a rival beached off-road is stuck
+// forever without help — the field has to notice and return it to the grid.
+// The player is deliberately exempt (see `returnToGrid`'s caller in
+// `stepField`), so only the rival entry is checked here.
+//
+// `stallTime` is preset to one `dt` short of the threshold rather than
+// letting the AI actually drive itself off-road and stay there for several
+// seconds: a car freshly placed off-road at rest is exactly the "beached"
+// case the reviewer measured (v=0, and one frame is nowhere near enough
+// acceleration to clear STALL_SPEED), but with a normal `mu`, `driveAi`
+// steering back toward the line will usually claw its way back onto the
+// track before three real seconds pass — that's a property of this
+// particular off-road spot's grip, not of the recovery mechanism under test.
+// Presetting the timer isolates the trigger itself: given the off-road and
+// stopped conditions hold for the one frame that crosses the threshold, does
+// the field return the car to its grid slot without touching its race
+// progress.
+test('a rival stuck off-road and stopped is returned to its grid slot, race progress kept', () => {
+  const track = circuit();
+  const field = createRaceField(track, { rivals: 1, level: 'pro' });
+  const rival = field.entries[1];
+
+  // Off the track entirely: far along the local normal from the centerline.
+  const s = track.centerline.samples[500];
+  setPose(rival.vehicle, s.x + s.nx * 30, s.z + s.nz * 30, 0, rival.view);
+  rival.laps = 1;
+  rival.elapsed = 45;
+  rival.lapStart = 20;
+  rival.stallTime = 2.99; // one frame from crossing the 3 s threshold
+
+  const beforeQ = track.query(rival.vehicle.x, rival.vehicle.z);
+  assert.ok(Math.abs(beforeQ.lateral) > beforeQ.halfWidth + 1, 'test setup: rival must start off-road');
+  // Match `prevT` to this synthetic placement, or the jump from the grid's
+  // t (~1) to this off-road spot's t reads as a lap-boundary wrap in its own
+  // right — an artefact of teleporting the test's car directly rather than
+  // driving it here, not something `stepField` needs to guard against.
+  rival.prevT = beforeQ.t;
+
+  stepField(field, noInput(), track, DT);
+
+  const grid = gridPose(track, rival.slot);
+  const dist = Math.hypot(rival.vehicle.x - grid.x, rival.vehicle.z - grid.z);
+  assert.ok(dist < 1, `rival was not returned to its grid slot (${dist.toFixed(2)} m away)`);
+  assert.equal(rival.stallTime, 0, 'stall timer must reset once recovered');
+  // Race progress is untouched: this is a recovery, not a reset.
+  assert.equal(rival.laps, 1, 'stall recovery must not touch lap count');
+  assert.ok(Math.abs(rival.elapsed - (45 + DT)) < 1e-9,
+    'stall recovery must not touch elapsed race time');
+  assert.equal(rival.lapStart, 20, 'stall recovery must not touch lapStart');
 });
 
 // The five tests above never isolate the contact count: they'd still pass if
@@ -186,6 +261,26 @@ test('rivalGapDisplay: a lap apart at the same track position is a lap count, no
   const display = rivalGapDisplay(a, b, lapLength);
   assert.equal(display.kind, 'laps');
   assert.equal(display.delta, 1, 'a is exactly one lap behind b');
+});
+
+// The "behind" direction above was the only one covered — the untested
+// "ahead" direction is exactly the blind spot pattern that hid C1's off-road
+// state, so pin it too: `delta` must flip sign, not just magnitude.
+test('rivalGapDisplay: a lap ahead at the same track position is a negative lap count', () => {
+  const track = circuit();
+  const field = createRaceField(track, { rivals: 1, level: 'pro' });
+  const [a, b] = field.entries;
+  const lapLength = track.centerline.length;
+  const s = track.centerline.samples[100];
+
+  placeAt(a, s);
+  placeAt(b, s);
+  a.laps = 1; a.finished = false;
+  b.laps = 0; b.finished = false;
+
+  const display = rivalGapDisplay(a, b, lapLength);
+  assert.equal(display.kind, 'laps');
+  assert.equal(display.delta, -1, 'a is exactly one lap ahead of b');
 });
 
 test('rivalGapDisplay: a finished car reports its finish time, not a live position gap', () => {
