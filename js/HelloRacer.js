@@ -26,6 +26,7 @@ import { CreditsPanel } from './dash/CreditsPanel.js';
 import { createTelemetry } from './dash/telemetry.js';
 import { SetupPanel } from './dash/setupPanel.js';
 import { PhysicsModePanel, ensureTopRightStack } from './dash/PhysicsModePanel.js';
+import { RivalPanel } from './dash/RivalPanel.js';
 import {
   readStoredPhysicsMode, resolvePhysicsMode, writeStoredPhysicsMode,
 } from './physics/physicsMode.js';
@@ -60,6 +61,12 @@ import {
   setPose, resetVehicle, createVehicle, replayStep, renderPose, telemetryOf,
 } from './physics/vehicle.js';
 import { resetGhost as resetGhostState } from './physics/ghost.js';
+import { createRaceField, stepField, resetField, gridPose } from './race/raceField.js';
+import {
+  createStartLights, armStartLights, resetStartLights, advanceStartLights,
+  startInputLocked, jumpStartExpired,
+} from './race/startLights.js';
+import { StartLightsHud } from './dash/StartLightsHud.js';
 import { GroundedSkybox } from 'three/addons/objects/GroundedSkybox.js';
 
 const SKY_COLOR = 0xa8d6ff;
@@ -99,6 +106,45 @@ const SKYBOX_RADIUS = 2200;
 const SKYBOX_GROUND_Y = -0.35;
 const SKYBOX_Y = SKYBOX_HEIGHT + SKYBOX_GROUND_Y;
 
+/**
+ * The rival's livery: a hue-shifted copy of the shipped "Apex Racing" body
+ * paint (midnight blue / orange — see `scripts/generate-body-paint.py`), not
+ * a second catalog shell. `obj/cars/*` is gitignored, user-downloaded CC-BY
+ * art absent on a fresh clone and on the deployed site, so a rival built from
+ * one would be an invisible car for most players. 160deg turns the navy into
+ * a dark maroon and the orange into cyan — distinct from the player's paint
+ * at a glance, and (checked directly) not a rotation that lands back near
+ * navy the way the complementary 180deg does.
+ */
+const RIVAL_LIVERY = { hueDeg: 160 };
+
+/**
+ * Minimal seeded PRNG (mulberry32) for the start-lights hold.
+ *
+ * `createStartLights` takes any `() => number` and defaults to `Math.random`,
+ * which would work fine for real play on its own — a ghost/replay lap never
+ * reconstructs anything from the hold or its RNG (they record concrete input
+ * frames instead; see startLights.js's header). Seeding it here buys nothing
+ * for correctness. It is used anyway for the same reason the injection point
+ * exists at all: a fixed seed is what lets a test pin an exact hold down,
+ * and wall-clock entropy is a convenient, cheap source of one that stays
+ * just as unpredictable to the driver as `Math.random` was.
+ */
+function seededRng(seed) {
+  let s = seed >>> 0;
+  return function () {
+    s |= 0; s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** A seed only wall-clock timing could reproduce — fresh, unlearnable, per race. */
+function newRaceSeed() {
+  return (Date.now() ^ Math.floor(performance.now() * 1000)) >>> 0;
+}
+
 class HelloRacer {
   constructor() {
     this.scene = null;
@@ -107,10 +153,14 @@ class HelloRacer {
     this.stats = null;
 
     this.car = null;
+    this.rivalCar = null;
+    this.field = null;
     this.track = null;
     this.dashboard = null;
     this.controlHints = null;
     this.credits = null;
+    this.startLights = null;
+    this.startLightsHud = null;
     this._launched = false;
     this.telemetry = null;
     this._camRadius = CHASE_DISTANCE;
@@ -302,23 +352,47 @@ class HelloRacer {
 
     this._loadEnvironment();
 
+    // The race field: every car on track, stepped together. The player is entry
+    // 0, driven by the keyboard instead of `driveAi` — see raceField.js's header.
+    this.field = createRaceField(this.track, { rivals: 1, level: 'pro', physicsMode: this.physicsMode });
+    // Both cars sit on the grid, held, until the player arms the lights — see
+    // _armStart. `seededRng` here is not a determinism requirement (see its
+    // own comment); it just gives each race a hold as unpredictable as
+    // `Math.random` would, drawn from a source a test could also pin down.
+    this.startLights = createStartLights(seededRng(newRaceSeed()));
+
     this.car = new Car(this.scene, {
       backend: this._rendererBackend,
       physicsMode: this.physicsMode,
     });
+    // The field, not the freshly-constructed `Car`, owns the player's physics —
+    // `stepField` advances every entry together so car-to-car contact resolves
+    // against both cars' post-step state in the same frame. `Car` becomes a view
+    // onto whichever vehicle it is pointed at; see `_syncFieldVehicle`.
+    this.car.vehicle = this.field.entries[0].vehicle;
     // Materials that explicitly receive `envMap` need it wired in; otherwise
     // dielectrics go unnaturally dark (no ambient IBL).
     this.car.loadAssets(this._envMap);
+
+    this.rivalCar = new Car(this.scene, {
+      backend: this._rendererBackend,
+      physicsMode: this.physicsMode,
+      livery: RIVAL_LIVERY,
+    });
+    this.rivalCar.loadAssets(this._envMap);
+
     this._placeCarOnTrack();
     const topRight = ensureTopRightStack(container);
     this._mountRenderPanel(topRight);
     this._mountPhysicsModePanel(topRight);
     this._mountCarPicker(topRight);
+    this._mountRivalPanel(topRight);
 
     this.telemetry = createTelemetry({ lapLength: this.track.centerline.length });
     this.dashboard = new Dashboard(container, this.track, { circuitName: DEFAULT_CIRCUIT_NAME });
     this.controlHints = new ControlHints(container);
     this.credits = new CreditsPanel(container);
+    this.startLightsHud = new StartLightsHud(container, { onArm: () => this._armStart() });
     this._mountModLoader(container);
 
     // Setup screen. Applying one rebuilds the car, because half of a setup lives in
@@ -523,11 +597,31 @@ class HelloRacer {
     });
   }
 
+  _mountRivalPanel(container) {
+    this.rivalPanel = new RivalPanel(container, {
+      onLevelChange: level => this._applyRivalLevel(level),
+    });
+  }
+
+  /**
+   * Re-level the rival's AI in place. `field.entries[n].ai.level` is read
+   * fresh by `driveAi` every step (see `race/aiDriver.js`), so writing it
+   * here is the whole change — no rebuild, no new AI state, and no gap where
+   * a stored preference string was never actually threaded into a driver.
+   */
+  _applyRivalLevel(level) {
+    for (const e of this.field.entries) {
+      if (!e.isPlayer && e.ai) e.ai.level = level;
+    }
+  }
+
   _applyPhysicsMode(mode) {
     this.physicsMode = mode;
     writeStoredPhysicsMode(mode);
     const setup = this.setup ?? defaultSetup();
     this.car.rebuild(setup, { physicsMode: mode });
+    this._syncFieldVehicle();
+    this._rebuildRivalVehicles(mode);
     this.car.vehicle.recorder = this.ghost.current;
     this.ghostCar = createVehicle({ physicsMode: mode });
     this._placeCarOnTrack();
@@ -1107,24 +1201,53 @@ class HelloRacer {
     this.dashboard.toggle();
     this.controlHints.setVisible(this.dashboard.visible);
     this.credits?.setVisible(this.dashboard.visible);
+    this.rivalPanel?.setVisible(this.dashboard.visible);
   }
 
   /**
-   * The kernel's flat state vector is authoritative, and `v.vx` and friends are
-   * copies made once a frame. Clearing the copies by hand left the real state
-   * untouched, so a reset car drove off with the velocity it had before.
+   * `Car.rebuild` (setup changes, physics-mode changes) replaces `this.car.vehicle`
+   * with a freshly-created one. Without this, the field would keep stepping the
+   * old vehicle object — unbuilt, unrendered — while the visible car quietly
+   * stopped being driven by anything.
    */
-  _zeroVehicle(v) {
-    resetVehicle(v, this.track);
+  _syncFieldVehicle() {
+    this.field.entries[0].vehicle = this.car.vehicle;
   }
 
+  /**
+   * Rebuild every RIVAL's vehicle onto a new physics mode.
+   *
+   * `physicsMode` is not personal the way a car setup is — it is a global
+   * fidelity toggle, baked into `createVehicle` at construction (grip scale
+   * and tyre behaviour both come from `physicsPreset(physicsMode)`; see
+   * physics/vehicle.js and physics/physicsMode.js). Leaving a rival on the
+   * old preset after a mode switch would race it under different grip from
+   * the player while the two share one contact solver — exactly the
+   * asymmetry the field exists to rule out: the AI is supposed to drive the
+   * same car the player does, not a car tuned differently underneath it.
+   *
+   * `_applySetup` deliberately does NOT call this: a setup is the player's
+   * own customisation of their own car, not something a rival should ever
+   * inherit. Do not "fix" that by making setup global too — it is global-vs-
+   * personal that decides which of these two mirrors the player and which
+   * does not, not a shared code path either forgot.
+   */
+  _rebuildRivalVehicles(mode) {
+    for (const e of this.field.entries) {
+      if (e.isPlayer) continue;
+      e.vehicle = createVehicle({ physicsMode: mode });
+    }
+  }
+
+  /** Both cars back to their grid slots. `field` is the single source of pose. */
   _placeCarOnTrack() {
-    const s = this.track.spawn();
-    const yaw = Math.atan2(-s.tx, -s.tz);
-    this.car.root.position.set(s.x, 0, s.z);
-    this.car.root.rotation.y = yaw;
-    setPose(this.car.vehicle, s.x, s.z, yaw, this.track);
-    this._zeroVehicle(this.car.vehicle);
+    resetField(this.field, this.track);
+    const cars = [this.car, this.rivalCar];
+    for (let i = 0; i < cars.length; i++) {
+      const p = gridPose(this.track, i);
+      cars[i].root.position.set(p.x, 0, p.z);
+      cars[i].root.rotation.y = p.yaw;
+    }
   }
 
   _clearCarForGridReset() {
@@ -1155,9 +1278,16 @@ class HelloRacer {
    * The run starts when the driver does: the lap clock is re-zeroed on the
    * first throttle after a grid reset, so it reads driving time rather than
    * however long the car sat parked.
+   *
+   * Guarded on the lights so a throttle press while held — idle, mid-
+   * sequence, or a jump start awaiting its verdict — doesn't zero the clock
+   * before the car is actually free to move; `startInputLocked` covers all
+   * three. The real launch press, the one that survives, arrives once the
+   * lock lifts at lights out.
    */
   _checkLaunch() {
     if (this._launched) return;
+    if (this.startLights && startInputLocked(this.startLights)) return;
     const input = this.car.input;
     if (input.forward || input.reverse) {
       this._launched = true;
@@ -1165,11 +1295,20 @@ class HelloRacer {
     }
   }
 
+  /** The player is ready. Called from the START button; does nothing off the grid. */
+  _armStart() {
+    if (this.startLights) armStartLights(this.startLights);
+  }
+
   _resetRace() {
     this._clearCarForGridReset();
     this._placeCarOnTrack();
     this.car.restoreMeshDamage();
+    this.rivalCar.restoreMeshDamage();
     this._launched = false;
+    // A fresh seed for a fresh race, so this race's hold has no relation to
+    // the last one's — cosmetic rather than load-bearing, same as at init().
+    this.startLights = createStartLights(seededRng(newRaceSeed()));
     if (this.telemetry?.reset) this.telemetry.reset();
     this._chaseReady = false;
     this._followYaw = this.car.root.rotation.y;
@@ -1219,9 +1358,37 @@ class HelloRacer {
     this._lastTime = now;
     this._tickQualityScaler(rawMs);
 
+    // The start procedure: idle until armed from the HUD button, then the
+    // gantry sequence, then lights out — or a jump start back to idle. Advance
+    // it before the field steps so `field.locked` reflects this frame's phase,
+    // and `stepField` (see raceField.js) is the single gate holding BOTH cars
+    // on the grid, rival included, so the rival cannot creep off early either.
+    const wasLocked = this.field.locked;
+    const throttlePressed = Boolean(this.car.input.forward || this.car.input.reverse);
+    advanceStartLights(this.startLights, dt, throttlePressed);
+    if (jumpStartExpired(this.startLights)) {
+      resetField(this.field, this.track);
+      resetStartLights(this.startLights);
+    }
+    this.field.locked = startInputLocked(this.startLights);
+    // `advance` (physics/vehicle.js) records a step onto `car.vehicle.recorder`
+    // every frame it runs, locked or not — so without this, the ghost's next
+    // lap would open with however long the grid sat armed, the ~7 s gantry
+    // itself, and any aborted jump-start retries, all recorded as the car
+    // sitting still under brake. None of that is the lap. Reset right on the
+    // unlock edge — the one frame the car is actually freed to drive — so the
+    // recording starts exactly where the lap does, however long the player
+    // waited to press START.
+    if (wasLocked && !this.field.locked) resetGhostState(this.ghost);
     this._checkLaunch();
-    this.car.updateSteering(dt);
-    this.car.updatePhysics(dt, this.track);
+    this.startLightsHud?.update(this.startLights);
+    // Every car on the grid, stepped together — contact resolves against both
+    // cars' post-step state in the same frame, which a car stepping itself
+    // independently could not do. The player's keyboard state feeds in here
+    // instead of `this.car.updateSteering`/`updatePhysics` driving it alone.
+    stepField(this.field, this.car.input, this.track, dt);
+    this.car.render(this.track, dt);
+    this.rivalCar.render(this.track, dt, this.field.entries[1].vehicle);
     // The car's effect set is built on its first physics frame, so the handover of
     // the tyre-mark texture to the asphalt happens here rather than at setup.
     if (!this._marksConnected && this.car.tyreMarkTexture) {
@@ -1323,6 +1490,7 @@ class HelloRacer {
     this._updateGhost(snap, dt);
     this.engineAudio.update(snap);
     if (this.dashboard.visible) this.dashboard.update(snap, dt);
+    this.rivalPanel?.update(this.field);
   }
 
   _applyJitter() {
@@ -1345,6 +1513,7 @@ class HelloRacer {
   _applySetup(setup) {
     this.setup = setup;
     this.car.rebuild(setup, { physicsMode: this.physicsMode });
+    this._syncFieldVehicle();
     this.car.vehicle.recorder = this.ghost.current;
     this._placeCarOnTrack();
     this.telemetry.reset?.();

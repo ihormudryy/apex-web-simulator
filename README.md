@@ -24,11 +24,53 @@ The bundled track is a **generic procedural layout** labelled *Northamptonshire 
 | H | Hide HUD |
 | + / − | Rear camera zoom |
 | 1–3, T, G | Render FX toggles (see Render panel) |
+| START button | Arm the lights, race the rival (3 laps) |
+
+## Racing the rival
+
+A single AI rival lines up alongside you on the grid, in a hue-shifted version
+of the default "Apex Racing" livery so the two cars stay easy to tell apart.
+Press the **START** button (top centre) to arm the light sequence — five red
+lights, then lights out. Jump the start and the lights reset for another try.
+The race is three laps; standings, current lap and the gap to the rival are on
+the **Rival** panel, top-right, next to the difficulty buttons. The gap reads
+in seconds (`+` if you're behind) when you're on the same lap, switches to a
+lap count (`+1 LAP`) once one of you has lapped the other, and shows the
+rival's finish time once it crosses the line — a live distance-based number
+stops being meaningful the moment the other car parks.
+
+Difficulty scales how much of the car the AI actually uses — braking and
+cornering g, and a top-speed cap — never the physics itself; it drives the
+same car through the same code the keyboard does. Measured best laps on this
+circuit, solo (no rival on track, 0% of the run off-road) — racing a rival
+adds defending and avoidance behaviour that is capped by a conservative
+heuristic budget (see `aiDriver.js`'s `defendBudget`) tuned to the specific
+rival scenario it was measured against. That budget is zero at **Ace**:
+letting it defend or avoid at full strength was measured to put it off the
+road in realistic chase configurations, so it does not defend or avoid at
+all — an Ace rival's line is bit-identical with or without you alongside it:
+
+| Level | Best lap |
+|-------|----------|
+| Club | ~157.5 s |
+| Pro | ~144.8 s |
+| Ace | ~137.8 s |
+
+For reference, a flat-out quasi-static planner laps this circuit in about
+131 s — even Ace stays a few seconds off that pace, deliberately: its
+cornering and braking figures were picked as a notch that measures clean
+among a scattered, undiagnosed set of unstable ones nearby (see
+`aiDriver.js`'s `DIFFICULTY` header for the sweep data), and pushing them
+further risks landing on an unstable one instead of gaining pace. Your choice
+of level is remembered
+(`apex-web-simulator.rivalLevel`) and takes effect immediately, mid-race
+included.
 
 ## Mods / car catalog
 
-Use the **Car** panel (top-right) to pick a shell. The bundled **Ferrari** is the
-default. Mercedes W14 and AMR23 load from `obj/cars/` — see
+Use the **Car** panel (top-right) to pick a shell. The bundled **Apex GT1** —
+the original HelloRacer placeholder mesh, in the fictional "Apex Racing"
+livery — is the default. Mercedes W14 and AMR23 load from `obj/cars/` — see
 [obj/cars/README.md](obj/cars/README.md) for the Sketchfab zip layout.
 
 You can also drag a `.glb` / `.gltf` onto the page:

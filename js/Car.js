@@ -6,7 +6,7 @@ import {
 } from './physics/vehicle.js';
 import {
   normalFromHeight, roughnessFromNoise, metallicFromNoise, specularIntensityFromNoise,
-  carbonWeaveNormal, tyreMicroNormalAndRoughness,
+  carbonWeaveNormal, tyreMicroNormalAndRoughness, hueRotateRGBA,
 } from './render/carProceduralMaps.js';
 import { MASS, G, WB, LR, LF } from './physics/constants.js';
 import { cockpitSteerAngle, followSteerAngle } from './render/cockpitSteer.js';
@@ -48,12 +48,16 @@ const STEER_HUB = { x: 0, y: 0.5933, z: 0.5054 };
 export class Car {
   /**
    * @param {THREE.Scene} scene
-   * @param {{ backend?: 'webgl' | 'webgpu' }} [options]
+   * @param {{ backend?: 'webgl' | 'webgpu', livery?: { hueDeg: number } | null }} [options]
+   *   `livery.hueDeg` recolours the body paint (see `_bodyPaintTexture` below)
+   *   so a rival car reads as a different team at a glance. `null`/omitted
+   *   keeps the shipped "Apex Racing" paint untouched.
    */
-  constructor(scene, { backend = 'webgl', physicsMode = 'arcade' } = {}) {
+  constructor(scene, { backend = 'webgl', physicsMode = 'arcade', livery = null } = {}) {
     this.root = new THREE.Object3D();
     scene.add(this.root);
     this._backend = backend === 'webgpu' ? 'webgpu' : 'webgl';
+    this._livery = livery;
     this._particles = enableCarParticleSystems(this._backend);
 
     // Yaw-free pitch/roll carrier. It must sit OUTSIDE visualRoot's constant
@@ -534,6 +538,43 @@ export class Car {
   }
 
   /**
+   * A hue-shifted copy of `BodyPaint.jpg`, for the rival's livery — see the
+   * `livery` constructor option.
+   *
+   * Deliberately drawn to a fresh `<canvas>` per call rather than mutating a
+   * shared image or `DataTexture`: `BinLoader` caches parsed *geometry* by
+   * url exactly so two cars can share GPU buffers (see its header), but a
+   * texture is a different story — this recolour must land on ONLY this
+   * car's material, or the player's own body paint would shift the moment a
+   * rival spawned. `THREE.TextureLoader.load` already hands back a brand-new
+   * `Texture` (and, with the default `Cache.enabled === false`, a fresh
+   * `Image`) on every call, so drawing into a new canvas here can never
+   * alias the other car's — this comment records that invariant, not a lock
+   * this code takes out itself.
+   * @param {THREE.TextureLoader} tl
+   * @returns {THREE.Texture}
+   */
+  _tintedBodyPaintTexture(tl) {
+    const hueDeg = this._livery.hueDeg;
+    const t = tl.load('obj/textures/BodyPaint.jpg', loaded => {
+      const img = loaded.image;
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      hueRotateRGBA(frame.data, hueDeg);
+      ctx.putImageData(frame, 0, 0);
+      loaded.image = canvas;
+      loaded.needsUpdate = true;
+    });
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 8;
+    return t;
+  }
+
+  /**
    * @param {THREE.Texture} [environment] PMREM environment for the metallic and
    *   glossy parts. Without one, `metalness` has nothing to reflect and reads black.
    */
@@ -603,7 +644,7 @@ export class Car {
     } : {};
 
     this.bodyPaintMat = new THREE.MeshPhysicalMaterial({
-      map: tex('obj/textures/BodyPaint.jpg'),
+      map: this._livery ? this._tintedBodyPaintTexture(tl) : tex('obj/textures/BodyPaint.jpg'),
       envMap, envMapIntensity: 0.72,
       roughness: 0.38, roughnessMap: bodyRoughTex,
       metalness: 0.0, metalnessMap: bodyMetalTex,
@@ -746,7 +787,13 @@ export class Car {
 
     for (const [name, p] of Object.entries(bodyParts)) {
       BinLoader.load(`obj/js/${name}.bin`, geo => {
-        const mesh = new THREE.Mesh(geo, p.mat);
+        // BinLoader hands out one shared geometry instance per url so that
+        // every car on track reuses the same GPU buffers. BodyPaint is the
+        // one part this class deforms in place (see _applyMeshDamage below),
+        // so it alone must be cloned here — otherwise damaging one car's
+        // wing would deform and re-light every other car sharing this url.
+        const partGeo = name === 'BodyPaint' ? geo.clone() : geo;
+        const mesh = new THREE.Mesh(partGeo, p.mat);
         mesh.position.set(p.x, p.y, p.z);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
@@ -755,10 +802,10 @@ export class Car {
         // rather than a second load of the same file — and for visible damage,
         // which deforms this geometry's wing region in place.
         if (name === 'BodyPaint') {
-          this._bodyGeometry = geo;
+          this._bodyGeometry = partGeo;
           this._bodyOffset = { x: p.x, y: p.y, z: p.z };
           this._paintMesh = mesh;
-          const pos = geo.attributes.position;
+          const pos = partGeo.attributes.position;
           this._paintBase = new Float32Array(pos.array);
           this._wingRegions = wingWeights(this._paintBase, pos.count);
         }
@@ -1132,9 +1179,34 @@ export class Car {
   }
 
   updatePhysics(dt, track) {
-    const v = this.vehicle;
+    advance(this.vehicle, this.input, track, dt);
+    this.render(track, dt);
+  }
+
+  /**
+   * Draw the current vehicle state onto the meshes: wheels, attitude, tyre
+   * squash, effects. Split out of `updatePhysics` so a car whose physics is
+   * stepped elsewhere can still be drawn through the same pipeline the
+   * player's car uses — `raceField.js` advances every car on the grid
+   * together in one place, because contact resolution needs both cars'
+   * post-step state in the same frame, which rules out each car stepping
+   * itself independently.
+   *
+   * The wheels are why this cannot be skipped for such a car: `_makeWheel`
+   * parents `lfw`/`rfw`/`lrw`/`rrw` under `this.root`, so they move as a
+   * group with it for free, but each wheel's OWN local offset — the four
+   * corners, the suspension travel, the squash drop — is written by
+   * `wheelRootPosition` fresh every frame, right here. A car that never
+   * calls this stays at the local position `_makeWheel` constructed it
+   * with, `(0, 0, 0)`: all four wheels collapsed onto the chassis origin,
+   * not spread to the car's four corners.
+   *
+   * `vehicle` defaults to `this.vehicle`, so this split is invisible to
+   * `updatePhysics` above, the one caller that existed before it.
+   */
+  render(track, dt, vehicle = this.vehicle) {
+    const v = vehicle;
     this._track = track;
-    advance(v, this.input, track, dt);
 
     if (!this._fx) {
       this._fx = createCarEffects(this._scene, {

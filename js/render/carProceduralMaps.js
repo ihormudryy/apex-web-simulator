@@ -180,6 +180,47 @@ export function carbonWeaveNormal({ size = 256, strength = 1.1, seed = 4, weaveF
   return { data, size };
 }
 
+/**
+ * Hue-rotate RGB pixels in place (alpha untouched) — the rival's livery hook.
+ *
+ * This is the matrix CSS `filter: hue-rotate()` uses (W3C Filter Effects), not
+ * an RGB→HSL→RGB round trip. Its rows each sum to 1 for every angle, so any
+ * grey pixel (R=G=B — the ink lines, panel shading and rivet shadows baked
+ * into BodyPaint.jpg) lands back on itself exactly, at every angle: only the
+ * saturated paint moves. An HSL round trip has no such guarantee and would
+ * measurably drift the greys as saturation and lightness get re-derived from
+ * rounded 8-bit RGB.
+ *
+ * Called on a canvas copy of the shipped texture, never the source `Image` or
+ * a shared `Texture` — each `Car` draws its own copy (see `Car.js`), so two
+ * cars never end up pointing at the same recoloured pixels.
+ *
+ * @param {Uint8ClampedArray} data RGBA, four bytes per pixel, mutated in place
+ * @param {number} degrees hue rotation; wraps naturally via sin/cos
+ * @returns {Uint8ClampedArray} `data`
+ */
+export function hueRotateRGBA(data, degrees) {
+  const a = (degrees * Math.PI) / 180;
+  const cosA = Math.cos(a);
+  const sinA = Math.sin(a);
+  const m00 = 0.213 + cosA * 0.787 - sinA * 0.213;
+  const m01 = 0.715 - cosA * 0.715 - sinA * 0.715;
+  const m02 = 0.072 - cosA * 0.072 + sinA * 0.928;
+  const m10 = 0.213 - cosA * 0.213 + sinA * 0.143;
+  const m11 = 0.715 + cosA * 0.285 + sinA * 0.140;
+  const m12 = 0.072 - cosA * 0.072 - sinA * 0.283;
+  const m20 = 0.213 - cosA * 0.213 - sinA * 0.787;
+  const m21 = 0.715 - cosA * 0.715 + sinA * 0.715;
+  const m22 = 0.072 + cosA * 0.928 + sinA * 0.072;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    data[i]     = m00 * r + m01 * g + m02 * b;
+    data[i + 1] = m10 * r + m11 * g + m12 * b;
+    data[i + 2] = m20 * r + m21 * g + m22 * b;
+  }
+  return data;
+}
+
 export function tyreMicroNormalAndRoughness({
   size = 256, seed = 6, grooveFreq = 18, grainFreq = 60,
 } = {}) {

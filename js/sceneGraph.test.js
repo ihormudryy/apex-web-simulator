@@ -18,6 +18,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { Car } from './Car.js';
+import { BinLoader } from './BinLoader.js';
 import { renderPose } from './physics/vehicle.js';
 import { unpackBinMesh } from './binMesh.js';
 import { buildCenterline } from './track/centerline.js';
@@ -309,4 +310,77 @@ test('the front wheels steer and the rears do not', () => {
   assert.ok(Math.abs(car.lfw.rotation.y) > 0.05, 'front wheels turned');
   assert.equal(car.lrw.rotation.y, 0, 'rear wheels did not');
   assert.equal(car.rrw.rotation.y, 0, 'rear wheels did not');
+});
+
+test('damaging one car does not deform another car sharing the cached BodyPaint geometry', async () => {
+  // BinLoader (js/BinLoader.js) hands out one shared BufferGeometry instance
+  // per url so two cars on track do not double the GPU footprint of the body
+  // and tyres they both load. BodyPaint is the one part Car.js deforms in
+  // place for visible damage (_applyMeshDamage -> deformBody, mutating
+  // geometry.attributes.position.array). If Car.js ever stopped cloning that
+  // one geometry before use, damaging one car would deform and re-light every
+  // other car's body sharing the same cached instance — this is the real
+  // scenario a second, AI-rival car introduces. Real fetch and the real
+  // gzip/.bin parse are used (only the network transport is stubbed) so the
+  // test exercises the actual code path in Car.js's bodyParts loop, not a
+  // reimplementation of it.
+  BinLoader.clearCache();
+  const bodyUrl = 'obj/js/BodyPaint.bin';
+  const raw = readFileSync(join(here, '../obj/js/BodyPaint.bin'));
+  const rawBuffer = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+
+  const originalFetch = globalThis.fetch;
+  const originalConsoleError = console.error;
+  const hadDocument = 'document' in globalThis;
+  const originalDocument = globalThis.document;
+  // Every other body/wheel/texture url this Car also requests is left
+  // unmocked-404; BinLoader already tolerates that (it logs and drops the
+  // part), so only BodyPaint needs serving.
+  globalThis.fetch = async url => {
+    if (String(url).endsWith('BodyPaint.bin')) {
+      return { ok: true, arrayBuffer: async () => rawBuffer.slice(0) };
+    }
+    return { ok: false, status: 404, statusText: 'not mocked' };
+  };
+  console.error = () => {};
+  // loadAssets() builds materials with THREE.TextureLoader, which needs
+  // `document.createElementNS` to mint an <img>; Node has none. A stub that
+  // never fires load/error is enough — geometry, which this test cares
+  // about, does not wait on textures to finish.
+  const fakeImg = () => ({ style: {}, addEventListener() {}, removeEventListener() {} });
+  globalThis.document = { createElementNS: fakeImg, createElement: fakeImg };
+  try {
+    const carA = new Car(new THREE.Scene(), { backend: 'webgl' });
+    carA.loadAssets(null);
+    // loadAssets's bodyParts loop calls BinLoader.load synchronously, which
+    // synchronously populates _pending before any microtask runs — so it is
+    // safe to grab and await it right here.
+    await BinLoader._pending.get(bodyUrl);
+
+    const carB = new Car(new THREE.Scene(), { backend: 'webgl' });
+    carB.loadAssets(null);
+    // BodyPaint is now cached; carB's load is satisfied from cache, whose
+    // callback fires synchronously inside BinLoader.load.
+
+    assert.ok(carA._bodyGeometry, 'car A never got its BodyPaint geometry');
+    assert.ok(carB._bodyGeometry, 'car B never got its BodyPaint geometry');
+    assert.notEqual(carA._bodyGeometry, carB._bodyGeometry,
+      'two cars must not share the same BodyPaint geometry instance');
+
+    const before = carB._bodyGeometry.attributes.position.array.slice();
+    carA._applyMeshDamage({ wing: 1, floor: 0, wheels: [1, 1, 1, 1], total: 1 });
+    const afterA = carA._bodyGeometry.attributes.position.array;
+    const afterB = carB._bodyGeometry.attributes.position.array;
+
+    assert.notDeepEqual(Array.from(afterA), Array.from(before),
+      'sanity check: damaging car A should actually deform its own mesh');
+    assert.deepEqual(Array.from(afterB), Array.from(before),
+      "damaging car A must not mutate car B's BodyPaint geometry");
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalConsoleError;
+    if (hadDocument) globalThis.document = originalDocument;
+    else delete globalThis.document;
+    BinLoader.clearCache();
+  }
 });
