@@ -78,6 +78,17 @@ test('every difficulty completes a lap without leaving the road', () => {
  * follower sitting a car-width to one side with a close, breathing gap (3-9 m,
  * the commonest race position) is enough to walk `ace` past its instability
  * cliff — see aiDriver.js's `defendBudget`. Same bound as the rival-less test.
+ *
+ * The rival is held one car-width (1.5 m) to the side, rigidly in the car's
+ * own frame (via its `right = (cos yaw, -sin yaw)`, see vehicle.js), rather
+ * than pinned exactly on top of it. A rival at `dist === 0` is the one input
+ * `alongsideAvoid` treats specially — its `dist < 1e-6` guard returns 0 — so
+ * pinning the rival there made that term identically zero for the whole test
+ * and left the fix's central claim, that the SUM of `defendBias` and
+ * `alongsideAvoid` is what gets clamped (not either alone), completely
+ * unexercised. At 1.5 m (inside `ALONGSIDE_CLEARANCE`'s 2.4 m) both terms are
+ * live throughout: `defendBias` from the breathing `aheadGap` below,
+ * `alongsideAvoid` from this fixed lateral offset.
  */
 function runLapsWithRival(levelId, seconds) {
   const track = circuit();
@@ -93,25 +104,35 @@ function runLapsWithRival(levelId, seconds) {
   // measured configurations for `ace` (85.5% of the run off-road).
   const rival = { x: 0, z: 0, lateralGap: -1.5, aheadGap: -6 };
   const period = 17;
-  let offRoad = 0;
+  let offRoad = 0, laps = 0, prevT = 0, lapStart = 0;
   const frames = Math.round(seconds / DT);
   for (let f = 0; f < frames; f++) {
-    rival.x = car.x;
-    rival.z = car.z;
+    // Rigidly alongside, on the `lateralGap` side, using the car's own
+    // right vector rather than the world axes — a real alongside rival
+    // stays beside the car through corners, not pinned to a world offset.
+    rival.x = car.x + Math.cos(car.yaw) * 1.5 * Math.sign(rival.lateralGap);
+    rival.z = car.z - Math.sin(car.yaw) * 1.5 * Math.sign(rival.lateralGap);
     rival.aheadGap = -(6 + 3 * Math.sin((2 * Math.PI * (f * DT)) / period));
     driveAi(ai, car, line, input, rival);
     updateSteering(car, input, DT);
     advance(car, input, track, DT);
     const q = track.query(car.x, car.z);
     if (Math.abs(q.lateral) > q.halfWidth + 1) offRoad++;
+    if (q.t < prevT - 0.5 && f * DT - lapStart > 20) {
+      laps++; lapStart = f * DT;
+    }
+    prevT = q.t;
   }
-  return { offRoad, frames, resets: car.resets };
+  return { offRoad, frames, laps, resets: car.resets };
 }
 
 test('every difficulty completes a lap without leaving the road, with a rival present', () => {
   for (const id of DIFFICULTY_ORDER) {
     const r = runLapsWithRival(id, 200);
     assert.equal(r.resets, 0, `${id}: physics went non-finite with a rival present`);
+    // Guards against an AI that simply stopped driving (no laps, but also no
+    // off-road frames because it never moved) passing this test vacuously.
+    assert.ok(r.laps >= 1, `${id}: completed no laps in 200 s with a rival present`);
     assert.ok(r.offRoad / r.frames < 0.02,
       `${id}: off the road for ${(100 * r.offRoad / r.frames).toFixed(1)}% of the run `
       + 'with a rival present');
