@@ -42,7 +42,10 @@ stops being meaningful the moment the other car parks.
 Difficulty scales how much of the car the AI actually uses — braking and
 cornering g, and a top-speed cap — never the physics itself; it drives the
 same car through the same code the keyboard does. Measured best laps on this
-circuit (0% of the run off-road):
+circuit, solo (no rival on track, 0% of the run off-road) — racing a rival
+adds defending and avoidance behaviour that can cost a little pace but is kept
+within a bound that never pushes a level off the road (see `aiDriver.js`'s
+`defendBudget`):
 
 | Level | Best lap |
 |-------|----------|

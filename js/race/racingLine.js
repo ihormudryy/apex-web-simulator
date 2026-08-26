@@ -172,11 +172,17 @@ const STEP = 0.02;
  */
 const DEFAULT_ITERATIONS = 60000;
 /**
- * Cornering budget the line's speed limit is quoted at, in g.
+ * Cornering budget the line's speed limit (`line.speed`, below) is quoted at, in g.
  *
- * Exported because `aiDriver` has to divide it back out to rescale the limit to
- * its own difficulty. Repeating the number there instead would leave two
- * constants that must agree and no way to notice when they stop agreeing.
+ * Stale note corrected: this used to be exported because `aiDriver` divided it
+ * back out to rescale `line.speed` to its own difficulty. It no longer does —
+ * see the `driveAi` comment by `line.speed` in aiDriver.js for why that
+ * rescaling was a category error (it silently capped `pro` and `ace` below
+ * their own topSpeed on every straight) and was replaced with deriving corner
+ * speed directly from `line.curvature` and the level's own `latG`/`topSpeed`.
+ * Nothing in this codebase currently imports `LINE_LAT_G`; it stays exported
+ * as the one place this module's own calibration figure is named, so a future
+ * caller that genuinely wants to match it doesn't have to hardcode 1.6 again.
  */
 export const LINE_LAT_G = 1.6;
 /** Nothing on this circuit is faster than this, m/s. */
@@ -261,6 +267,15 @@ export function buildRacingLine(samples, {
   const spacing = total / n;
 
   const curvature = new Float64Array(n);
+  // `speed` — this line's own cornering-speed estimate at `latG`/`topSpeed` —
+  // has NO production consumer: `aiDriver.driveAi` deliberately derives corner
+  // speed itself from `curvature` and its own level's `latG`/`topSpeed` rather
+  // than rescaling this array (see the `driveAi` comment there for the bug
+  // that reaching for `line.speed` caused). Kept computed and returned because
+  // `racingLine.test.js` uses it as a cheap sanity check on the line's
+  // tightest/loosest corner speed, and because it is a handful of flops per
+  // station on top of `curvature`, not a real cost — not because anything
+  // downstream of `buildRacingLine` is meant to drive by it.
   const speed = new Float64Array(n);
   const ds2 = spacing * spacing;
   for (let i = 0; i < n; i++) {
