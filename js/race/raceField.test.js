@@ -126,9 +126,9 @@ test('resetField puts both cars back on the grid', () => {
 });
 
 // C1b: `driveAi` never sets `reverse`, so a rival beached off-road is stuck
-// forever without help — the field has to notice and return it to the grid.
-// The player is deliberately exempt (see `returnToGrid`'s caller in
-// `stepField`), so only the rival entry is checked here.
+// forever without help — the field has to notice and recover it. The player
+// is deliberately exempt (see `recoverStranded`'s caller in `stepField`), so
+// only the rival entry is checked here.
 //
 // `stallTime` is preset to one `dt` short of the threshold rather than
 // letting the AI actually drive itself off-road and stay there for several
@@ -140,9 +140,10 @@ test('resetField puts both cars back on the grid', () => {
 // particular off-road spot's grip, not of the recovery mechanism under test.
 // Presetting the timer isolates the trigger itself: given the off-road and
 // stopped conditions hold for the one frame that crosses the threshold, does
-// the field return the car to its grid slot without touching its race
-// progress.
-test('a rival stuck off-road and stopped is returned to its grid slot, race progress kept', () => {
+// the field recover the car onto the road AT ITS OWN `t`, without touching
+// its race progress. (The natural-accrual test below covers the case this
+// one can't: whether recovery manufactures a lap credit.)
+test('a rival stuck off-road and stopped is recovered onto the road at its own t, race progress kept', () => {
   const track = circuit();
   const field = createRaceField(track, { rivals: 1, level: 'pro' });
   const rival = field.entries[1];
@@ -165,15 +166,70 @@ test('a rival stuck off-road and stopped is returned to its grid slot, race prog
 
   stepField(field, noInput(), track, DT);
 
+  // Recovered onto the road, not sent back to the grid: the whole point of
+  // recovering at the car's own `t` is that it is nowhere near the grid.
   const grid = gridPose(track, rival.slot);
-  const dist = Math.hypot(rival.vehicle.x - grid.x, rival.vehicle.z - grid.z);
-  assert.ok(dist < 1, `rival was not returned to its grid slot (${dist.toFixed(2)} m away)`);
+  const distFromGrid = Math.hypot(rival.vehicle.x - grid.x, rival.vehicle.z - grid.z);
+  assert.ok(distFromGrid > 100,
+    `rival was sent back to the grid (${distFromGrid.toFixed(2)} m away) instead of recovered in place`);
+  const afterQ = track.query(rival.vehicle.x, rival.vehicle.z);
+  assert.ok(Math.abs(afterQ.lateral) < afterQ.halfWidth,
+    `recovered rival is not back on the road (${afterQ.lateral.toFixed(2)} m lateral, `
+    + `halfWidth ${afterQ.halfWidth.toFixed(2)})`);
+  // `t` barely moves: recovered where it went off, not teleported round the lap.
+  const dt = Math.abs(afterQ.t - beforeQ.t);
+  assert.ok(Math.min(dt, 1 - dt) < 0.01,
+    `recovered rival's t moved too far from where it went off (${beforeQ.t.toFixed(4)} -> ${afterQ.t.toFixed(4)})`);
   assert.equal(rival.stallTime, 0, 'stall timer must reset once recovered');
   // Race progress is untouched: this is a recovery, not a reset.
   assert.equal(rival.laps, 1, 'stall recovery must not touch lap count');
   assert.ok(Math.abs(rival.elapsed - (45 + DT)) < 1e-9,
     'stall recovery must not touch elapsed race time');
   assert.equal(rival.lapStart, 20, 'stall recovery must not touch lapStart');
+});
+
+// The preset-stallTime test above cannot see this: presetting `stallTime` to
+// 2.99 and stepping once never lets `prevT` drift away from the recovery
+// point, so a bug in what the recovery reseeds `prevT`/`t` to is invisible
+// there. This drives the real `stepField` path — the AI actually driving,
+// the stall accruing frame by frame from zero — the way a rival would
+// genuinely get stuck mid-race. Placed deep in the grass (low `MU.grass`
+// plus rolling resistance keeps tractive force from ever clearing
+// STALL_SPEED — the same absorbing state STALL_TIME's own comment
+// describes), so this is not a synthetic setup, just a slow one.
+//
+// The regression this catches: an earlier recovery reseeded the car to the
+// GRID's `t` (~0.9996) while leaving `elapsed - lapStart` at whatever a
+// mid-race car had already accrued — far past MIN_LAP_TIME — so the very
+// next crossing (a fraction of a second later) credited a lap never driven.
+test('a naturally stranded rival gains no lap when the field recovers it', () => {
+  const track = circuit();
+  const field = createRaceField(track, { rivals: 1, level: 'ace' });
+  const rival = field.entries[1];
+  const input = noInput();
+  input.forward = true;
+
+  const s = track.centerline.samples[2000]; // roughly halfway round, t ~ 0.5
+  setPose(rival.vehicle, s.x + s.nx * 30, s.z + s.nz * 30, 0, rival.view);
+  rival.laps = 1;
+  const beforeQ = track.query(rival.vehicle.x, rival.vehicle.z);
+  rival.t = beforeQ.t;
+  rival.prevT = beforeQ.t;
+  // A car that has genuinely been racing a while, well past MIN_LAP_TIME
+  // since its last crossing — exactly the state that makes a manufactured
+  // crossing look like a completed lap.
+  rival.elapsed = 60;
+  rival.lapStart = 20;
+
+  // Long enough for STALL_TIME (3 s) to trip and for a manufactured crossing
+  // to show up if the recovery reseeds `t` near the start/finish line, nowhere
+  // near long enough to complete a genuine lap from mid-track (an `ace` lap
+  // is ~138 s).
+  for (let f = 0; f < Math.round(20 / DT); f++) {
+    stepField(field, input, track, DT);
+  }
+  assert.equal(rival.laps, 1,
+    `stranded-rival recovery credited a lap the rival never drove (laps: ${rival.laps})`);
 });
 
 // The five tests above never isolate the contact count: they'd still pass if

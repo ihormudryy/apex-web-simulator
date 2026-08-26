@@ -24,6 +24,21 @@
  * decoupled from the render loop (mirroring how physics already works) would
  * fix this properly; that is out of scope for this fix wave and is recorded
  * here rather than attempted.
+ *
+ * KNOWN LIMITATION: `elapsed` is wall-time-since-lights-out, not
+ * time-actually-driven-since-the-last-crossing — it accrues identically
+ * whether the car is racing or just sitting on the grid after the lights go
+ * green (see the MIN_LAP_TIME comment below for why it has to start counting
+ * at lights-out rather than 0). So a car that sits stationary for long enough
+ * after the green light before its first crossing can still trip the
+ * MIN_LAP_TIME guard on that very first crossing, crediting a lap it never
+ * drove: measured, sitting still ~19 s after lights-out then driving off is
+ * clean, but ~21 s credits one immediately. Strictly better than before this
+ * fix wave (previously the guard could be satisfied before a wheel ever
+ * turned, during the unbounded pre-lights hold — see the C2 fix below), but
+ * the root cause — `elapsed` measuring wall time rather than driven time — is
+ * untouched. A fix would need to track "time since last crossing" as its own
+ * clock, gated on actually moving, rather than deriving it from `elapsed`.
  */
 
 import {
@@ -44,11 +59,14 @@ const OFF_ROAD_MARGIN = 1;
 /** Below this the rival counts as stopped, not just slow through a corner. */
 const STALL_SPEED = 1.0;
 /**
- * How long a rival must sit off-road and stopped before the field returns it
- * to the grid. `driveAi` never sets `reverse` (see aiDriver.js), so a beached
- * rival cannot recover on its own — this is the mitigation the design doc
- * promises ("the field returns a stranded rival to the grid rather than
- * modelling a recovery") and that shipped without an implementation.
+ * How long a rival must sit off-road and stopped before the field recovers
+ * it. `driveAi` never sets `reverse` (see aiDriver.js), so a beached rival
+ * cannot recover on its own — this is the mitigation the design doc promises
+ * ("the field returns a stranded rival to the grid rather than modelling a
+ * recovery") and that shipped without an implementation. The recovery itself
+ * no longer matches that doc's wording, though: it puts the car back at its
+ * OWN position on track rather than the grid — see `recoverStranded` for why
+ * returning it to the grid turned out to manufacture a free lap.
  *
  * 3 s is long enough that the AI's normal driving — which can be
  * off-road-and-slow only briefly, e.g. correcting a slide onto the kerb —
@@ -176,24 +194,43 @@ export function resetField(field, track) {
 }
 
 /**
- * Return a stranded rival to its grid slot: zero its motion and place it back
- * on the road, but leave its race progress (`laps`, `elapsed`, `lapStart`)
- * alone — this is recovery from being stuck, not a reset of the race.
+ * Recover a stranded rival: zero its motion and place it back on the road AT
+ * ITS OWN `t` — centred on the centreline, facing the tangent — but leave its
+ * race progress (`laps`, `elapsed`, `lapStart`) alone — this is recovery from
+ * being stuck, not a reset of the race.
  *
- * `prevT` is reseeded from the car's new (grid) position for the same reason
- * `createRaceField`/`resetField` seed it from the actual grid `t` rather than
- * 0: without it, the next step's `t` would look like it wrapped backward
- * across the start/finish line from wherever the car was stuck, and — since
- * the car has likely been racing for well over MIN_LAP_TIME already — that
- * misread would silently credit a lap that was never driven.
+ * This used to return the car to its GRID slot instead, reseeding `prevT`
+ * from the grid's `t` (~0.9996) so the very next step wouldn't read as a
+ * backward wrap across the start/finish line. That stopped the immediate
+ * misread but not the real one: a rival that has been racing for a while
+ * already has `elapsed - lapStart` well past MIN_LAP_TIME, so the grid sits
+ * only a few metres before the line — and the very next crossing, a fraction
+ * of a second later, credited a lap the car never drove. Measured on the
+ * real `stepField` path with the stall accruing naturally (not a preset
+ * `stallTime`): a rival stranded at t=0.50 gained a lap within about 0.2 s of
+ * being "recovered" to the grid. See `raceField.test.js`'s
+ * "a naturally stranded rival gains no lap..." test, which drives that exact
+ * scenario and is what should have caught this before it shipped.
+ *
+ * Recovering at the car's OWN `t` instead sidesteps the whole class of bug:
+ * `t` barely moves — the car was stuck, not off racing a lap elsewhere — so
+ * no crossing is manufactured and `prevT` needs no special reseeding logic
+ * to compensate for one. It also reads as better racing behaviour: a
+ * recovered car rejoins where it went off, as it would in reality, rather
+ * than being sent back to the start mid-race.
+ *
+ * @param {object} entry
+ * @param {{index:number}} q this frame's already-computed query for `entry`
+ *   — reused rather than queried a second time.
  */
-function returnToGrid(entry, track) {
-  const pose = gridPose(track, entry.slot);
+function recoverStranded(entry, q) {
+  const s = entry.view.centerline.samples[q.index];
   resetVehicle(entry.vehicle);
-  setPose(entry.vehicle, pose.x, pose.z, pose.yaw, entry.view);
-  const gridT = entry.view.query(pose.x, pose.z).t;
-  entry.t = gridT;
-  entry.prevT = gridT;
+  const yaw = Math.atan2(-s.tx, -s.tz);
+  setPose(entry.vehicle, s.x, s.z, yaw, entry.view);
+  const here = entry.view.query(s.x, s.z).t;
+  entry.t = here;
+  entry.prevT = here;
   entry.stallTime = 0;
 }
 
@@ -313,7 +350,7 @@ export function stepField(field, playerInput, track, dt) {
       const offRoad = Math.abs(q.lateral) > q.halfWidth + OFF_ROAD_MARGIN;
       const stopped = speed(e.vehicle) < STALL_SPEED;
       e.stallTime = offRoad && stopped ? e.stallTime + dt : 0;
-      if (e.stallTime > STALL_TIME) returnToGrid(e, track);
+      if (e.stallTime > STALL_TIME) recoverStranded(e, q);
     }
   }
   return field;
